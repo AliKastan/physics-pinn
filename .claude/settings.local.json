@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Read(//c/Users/kasta/AppData/Local/Programs/Python/**)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(conda info:*)",
+      "Bash(python3:*)",
+      "Bash(py -3 -c \"import torch; import scipy; import matplotlib; print\\(''All deps OK''\\)\")"
+    ]
+  }
+}
