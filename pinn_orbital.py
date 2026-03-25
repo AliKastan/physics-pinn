@@ -40,6 +40,9 @@ PINN Approach:
     No simulation data is used — only the equations of motion.
 """
 
+import matplotlib
+matplotlib.use('Agg')
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -509,21 +512,21 @@ def visualize_orbital_results(model, ics, t_max, GM=1.0):
 
     plt.tight_layout()
     plt.savefig('orbital_pinn_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to orbital_pinn_results.png")
 
     # --- Print summary statistics ---
     print(f"\n{'='*55}")
     print("Conservation Summary")
     print(f"{'='*55}")
-    print(f"  Initial energy E₀ = {E0:.6f}")
-    print(f"  Classical max |ΔE/E₀| = {np.max(dE_ode):.2e}")
-    print(f"  PINN max |ΔE/E₀|     = {np.max(dE_pinn):.2e}")
-    print(f"  Initial angular momentum L₀ = {L0:.6f}")
+    print(f"  Initial energy E0 = {E0:.6f}")
+    print(f"  Classical max |dE/E0| = {np.max(dE_ode):.2e}")
+    print(f"  PINN max |dE/E0|     = {np.max(dE_pinn):.2e}")
+    print(f"  Initial angular momentum L0 = {L0:.6f}")
     dL_ode = np.abs((L_ode - L0) / L0)
     dL_pinn = np.abs((L_pinn - L0) / L0)
-    print(f"  Classical max |ΔL/L₀| = {np.max(dL_ode):.2e}")
-    print(f"  PINN max |ΔL/L₀|     = {np.max(dL_pinn):.2e}")
+    print(f"  Classical max |dL/L0| = {np.max(dL_ode):.2e}")
+    print(f"  PINN max |dL/L0|     = {np.max(dL_pinn):.2e}")
     print(f"  Max position error    = {np.max(pos_error):.6f}")
 
 
@@ -537,7 +540,7 @@ def plot_training_loss(loss_history):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig('orbital_training_loss.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to orbital_training_loss.png")
 
 

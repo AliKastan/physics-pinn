@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Read(//c/Users/kasta/AppData/Local/Programs/Python/**)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(conda info:*)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe --version)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"import torch; print\\(''torch'', torch.__version__\\)\")",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"import numpy; print\\(''numpy'', numpy.__version__\\)\")",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"import scipy; print\\(''scipy'', scipy.__version__\\)\")",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"import matplotlib; print\\(''matplotlib'', matplotlib.__version__\\)\")",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pip install torch numpy scipy matplotlib pytest jupyter)",
+      "Bash(alias python=\"/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe\")",
+      "Bash(python -c \"import torch, numpy, scipy, matplotlib; print\\(''All imports OK''\\)\")",
+      "Bash(PYTHON=\"/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe\")",
+      "Bash($PYTHON -c \"import torch, numpy, scipy, matplotlib; print\\(''All imports OK''\\)\")",
+      "Bash($PYTHON pinn_pendulum.py)",
+      "Bash($PYTHON pinn_orbital.py)",
+      "Bash($PYTHON pinn_inverse.py)",
+      "Bash($PYTHON hnn_pendulum.py)",
+      "Bash($PYTHON pinn_threebody.py)",
+      "Bash(ls:*)",
+      "Bash($PYTHON -m pytest tests/test_pendulum.py -v)",
+      "Bash($PYTHON -m pytest tests/test_pendulum.py tests/test_orbital.py -v)",
+      "Bash($PYTHON -m pytest tests/test_inverse.py -v)",
+      "Bash($PYTHON -m pytest tests/ -v)"
+    ]
+  }
+}

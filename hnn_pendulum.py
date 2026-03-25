@@ -41,6 +41,9 @@ Reference:
     "Hamiltonian Neural Networks." NeurIPS 2019.
 """
 
+import matplotlib
+matplotlib.use('Agg')
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -540,7 +543,7 @@ def visualize_hnn_results(hnn_model, pinn_model,
 
     plt.tight_layout()
     plt.savefig('hnn_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to hnn_results.png")
 
     # Print summary

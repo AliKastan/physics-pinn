@@ -26,6 +26,9 @@ PINN Approach:
     the network "learns" physics without any simulation data.
 """
 
+import matplotlib
+matplotlib.use('Agg')
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -365,7 +368,7 @@ def visualize_results(model, theta_0, omega_0, t_max, g=9.81, L=1.0):
 
     plt.tight_layout()
     plt.savefig('pendulum_pinn_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to pendulum_pinn_results.png")
 
 
@@ -379,7 +382,7 @@ def plot_training_loss(loss_history):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig('pendulum_training_loss.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to pendulum_training_loss.png")
 
 

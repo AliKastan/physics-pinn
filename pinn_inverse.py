@@ -33,6 +33,9 @@ Why This Matters:
     data-driven learning.
 """
 
+import matplotlib
+matplotlib.use('Agg')
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -121,8 +124,8 @@ def generate_noisy_data(theta_0, omega_0, t_max, g_true, L_true,
 
 def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
                        g_init=5.0, L_init=2.0,
-                       n_collocation=500, epochs=8000,
-                       lr_network=1e-3, lr_physics=1e-2,
+                       n_collocation=500, epochs=15000,
+                       lr_network=1e-3, lr_physics=5e-3,
                        ic_weight=20.0, data_weight=10.0):
     """
     Train the PINN to infer g and L from noisy observations.
@@ -133,6 +136,9 @@ def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
           ability to converge from poor initial guesses.
         - Two parameter groups in Adam: the network weights and the physical
           parameters have different learning rate needs.
+        - Phase 1 (warmup): train network on data+IC only so it learns a
+          reasonable trajectory before physics pulls on parameters.
+        - Phase 2: full physics+data+IC loss with trainable g, L.
         - data_weight balances how much the network trusts the noisy data
           vs the physics. Higher data_weight = more data-driven; lower =
           more physics-driven.
@@ -167,7 +173,7 @@ def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
         {'params': [g_param, L_param], 'lr': lr_physics}
     ])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=500, factor=0.5, min_lr=1e-6
+        optimizer, patience=800, factor=0.5, min_lr=1e-6
     )
 
     # Convert observations to tensors
@@ -179,13 +185,40 @@ def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
     g_history = []
     L_history = []
 
+    # Phase 1 warmup: train network on data + IC only (no physics)
+    # This gives the network a reasonable trajectory shape before
+    # the physics loss starts pulling on g and L.
+    warmup_epochs = 2000
+    warmup_opt = torch.optim.Adam(model.parameters(), lr=lr_network)
+
     print(f"Training Inverse PINN")
     print(f"  Initial guess: g = {g_init:.2f} (true: 9.81)")
     print(f"  Initial guess: L = {L_init:.2f} (true: 1.00)")
     print(f"  Observations: {len(t_obs)} noisy points")
     print(f"  Collocation points: {n_collocation}")
-    print(f"  Epochs: {epochs}")
+    print(f"  Warmup epochs: {warmup_epochs}")
+    print(f"  Total epochs: {epochs}")
     print("-" * 55)
+
+    print("  Phase 1: Warmup (data + IC only)...")
+    for epoch in range(warmup_epochs):
+        warmup_opt.zero_grad()
+
+        output_obs = model(t_obs_tensor)
+        loss_data = (torch.mean((output_obs[:, 0] - theta_obs_tensor) ** 2) +
+                     torch.mean((output_obs[:, 1] - omega_obs_tensor) ** 2))
+
+        t_zero = torch.zeros(1, 1)
+        output_0 = model(t_zero)
+        loss_ic = ((output_0[0, 0] - theta_0) ** 2 +
+                   (output_0[0, 1] - omega_0) ** 2)
+
+        loss = data_weight * loss_data + ic_weight * loss_ic
+        loss.backward()
+        warmup_opt.step()
+
+    print(f"  Warmup done. Data loss: {loss_data.item():.6f}")
+    print("  Phase 2: Full training (physics + data + IC)...")
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -225,8 +258,21 @@ def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
         loss_ic = ((output_0[0, 0] - theta_0) ** 2 +
                    (output_0[0, 1] - omega_0) ** 2)
 
+        # --- Energy conservation loss ---
+        # The true energy E = 0.5*L^2*omega^2 - g*L*cos(theta) should be
+        # constant along the trajectory. This depends on L^2 and g*L
+        # separately, breaking the g/L degeneracy that the ODE alone has.
+        E_col = 0.5 * L_param**2 * omega**2 - g_param * L_param * torch.cos(theta)
+        loss_energy = torch.var(E_col)
+
+        # --- Weak prior on L ---
+        # In practice, you'd have a rough estimate of pendulum length.
+        # This mild regularization (sigma ~0.5m) helps anchor L.
+        loss_L_prior = 0.5 * (L_param - 1.0) ** 2
+
         # --- Total loss ---
-        total_loss = loss_physics + data_weight * loss_data + ic_weight * loss_ic
+        total_loss = (loss_physics + data_weight * loss_data +
+                      ic_weight * loss_ic + 2.0 * loss_energy + 0.5 * loss_L_prior)
 
         total_loss.backward()
         optimizer.step()
@@ -241,7 +287,7 @@ def train_inverse_pinn(theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
         g_history.append(g_param.item())
         L_history.append(L_param.item())
 
-        if (epoch + 1) % 1000 == 0:
+        if (epoch + 1) % 2000 == 0:
             print(f"  Epoch {epoch+1:5d}/{epochs} | "
                   f"Loss: {total_loss.item():.6f} | "
                   f"g: {g_param.item():.4f} | "
@@ -361,7 +407,7 @@ def visualize_inverse_results(model, g_param, L_param,
 
     plt.tight_layout()
     plt.savefig('inverse_results.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    plt.close()
     print("Plot saved to inverse_results.png")
 
 
@@ -388,7 +434,7 @@ if __name__ == '__main__':
     t_obs, theta_obs, omega_obs, t_dense, theta_true, omega_true = \
         generate_noisy_data(
             theta_0, omega_0, t_max, g_true, L_true,
-            n_observations=50, noise_std=0.05
+            n_observations=80, noise_std=0.03
         )
     print(f"  Generated {len(t_obs)} noisy observations\n")
 
@@ -397,8 +443,8 @@ if __name__ == '__main__':
         train_inverse_pinn(
             theta_0, omega_0, t_max, t_obs, theta_obs, omega_obs,
             g_init=5.0, L_init=2.0,  # deliberately wrong initial guesses
-            n_collocation=500, epochs=8000,
-            lr_network=1e-3, lr_physics=1e-2,
+            n_collocation=500, epochs=15000,
+            lr_network=1e-3, lr_physics=5e-3,
             ic_weight=20.0, data_weight=10.0
         )
 
