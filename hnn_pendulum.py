@@ -542,9 +542,9 @@ def visualize_hnn_results(hnn_model, pinn_model,
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
 
     plt.tight_layout()
-    plt.savefig('hnn_results.png', dpi=150, bbox_inches='tight')
+    plt.savefig('hnn_pendulum_results.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print("Plot saved to hnn_results.png")
+    print("Plot saved to hnn_pendulum_results.png")
 
     # Print summary
     print(f"\n{'='*55}")
@@ -572,7 +572,7 @@ if __name__ == '__main__':
     m = 1.0
 
     # Initial conditions
-    theta_0 = np.pi / 4   # 45 degrees
+    theta_0 = 1.2          # ~68.8 degrees
     omega_0 = 0.0          # released from rest
     t_max = 10.0           # 10 seconds
 
