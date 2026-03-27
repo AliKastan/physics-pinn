@@ -107,20 +107,63 @@ class PINNThreeBody(nn.Module):
 # Training helpers
 # ===========================================================================
 
+def _pendulum_pointwise_residual(model, t_points, g, L):
+    """Per-point ODE residual for adaptive sampling (no graph needed)."""
+    t_points = t_points.clone().requires_grad_(True)
+    out = model(t_points)
+    theta, omega = out[:, 0:1], out[:, 1:2]
+    dtheta = torch.autograd.grad(
+        theta, t_points, torch.ones_like(theta), create_graph=False)[0]
+    domega = torch.autograd.grad(
+        omega, t_points, torch.ones_like(omega), create_graph=False)[0]
+    r = ((dtheta - omega)**2 + (domega + (g/L)*torch.sin(theta))**2).squeeze()
+    return r.detach()
+
+
+def _sample_adaptive_1d(model, residual_fn, n_col, t_max, n_grid=1000,
+                        uniform_frac=0.2):
+    """Sample collocation points proportional to residual on a 1D domain."""
+    t_grid = torch.linspace(0, t_max, n_grid).unsqueeze(1)
+    with torch.no_grad():
+        res = residual_fn(model, t_grid)
+    probs = res / (res.sum() + 1e-16)
+    n_a = int(n_col * (1 - uniform_frac))
+    idx = torch.multinomial(probs, n_a, replacement=True)
+    t_a = t_grid[idx]
+    t_u = torch.rand(n_col - n_a, 1) * t_max
+    return torch.cat([t_a, t_u], dim=0)
+
+
 def train_pendulum(theta_0, omega_0, t_max, g, L,
-                   n_col=400, epochs=3000, lr=1e-3, ic_w=20.0):
+                   n_col=400, epochs=3000, lr=1e-3, ic_w=20.0,
+                   adaptive=False):
     """Train a pendulum PINN and return model + loss history."""
     model = PINNPendulum()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
         opt, patience=300, factor=0.5, min_lr=1e-6)
     losses = []
-    progress = st.progress(0, text="Training pendulum PINN...")
+    label = "adaptive" if adaptive else "uniform"
+    progress = st.progress(0, text=f"Training pendulum PINN ({label})...")
+
+    cached_t_col = None
 
     for ep in range(epochs):
         opt.zero_grad()
-        t_col = torch.rand(n_col, 1) * t_max
-        t_col.requires_grad_(True)
+
+        # Adaptive resampling every 500 epochs
+        if adaptive and (ep % 500 == 0):
+            model.eval()
+            cached_t_col = _sample_adaptive_1d(
+                model,
+                lambda m, t: _pendulum_pointwise_residual(m, t, g, L),
+                n_col, t_max)
+            model.train()
+        if adaptive and cached_t_col is not None:
+            t_col = cached_t_col.clone().requires_grad_(True)
+        else:
+            t_col = torch.rand(n_col, 1) * t_max
+            t_col.requires_grad_(True)
 
         out = model(t_col)
         theta, omega = out[:, 0:1], out[:, 1:2]
@@ -152,8 +195,25 @@ def train_pendulum(theta_0, omega_0, t_max, g, L,
     return model, losses
 
 
+def _orbital_pointwise_residual(model, t_points, GM):
+    """Per-point ODE residual for orbital adaptive sampling."""
+    t_points = t_points.clone().requires_grad_(True)
+    out = model(t_points)
+    x, y, vx, vy = out[:, 0:1], out[:, 1:2], out[:, 2:3], out[:, 3:4]
+    ones = torch.ones_like(x)
+    dx = torch.autograd.grad(x, t_points, ones, create_graph=False)[0]
+    dy = torch.autograd.grad(y, t_points, ones, create_graph=False)[0]
+    dvx = torch.autograd.grad(vx, t_points, ones, create_graph=False)[0]
+    dvy = torch.autograd.grad(vy, t_points, ones, create_graph=False)[0]
+    r = torch.sqrt(x**2 + y**2 + 1e-8)
+    r3 = r**3
+    res = ((dx-vx)**2 + (dy-vy)**2 +
+           (dvx + GM*x/r3)**2 + (dvy + GM*y/r3)**2).squeeze()
+    return res.detach()
+
+
 def train_orbital(ecc, GM, n_orbits, n_col=600, epochs=5000,
-                  lr=1e-3, ic_w=50.0):
+                  lr=1e-3, ic_w=50.0, adaptive=False):
     """Train an orbital PINN and return model + loss history + ICs + t_max."""
     a = 1.0
     x0 = a * (1.0 - ecc)
@@ -168,17 +228,32 @@ def train_orbital(ecc, GM, n_orbits, n_col=600, epochs=5000,
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
         opt, patience=300, factor=0.5, min_lr=1e-6)
     losses = []
-    progress = st.progress(0, text="Training orbital PINN...")
+    label = "adaptive" if adaptive else "uniform"
+    progress = st.progress(0, text=f"Training orbital PINN ({label})...")
 
     x0_t = torch.tensor(x0, dtype=torch.float32)
     y0_t = torch.tensor(y0, dtype=torch.float32)
     vx0_t = torch.tensor(vx0, dtype=torch.float32)
     vy0_t = torch.tensor(vy0, dtype=torch.float32)
 
+    cached_t_col = None
+
     for ep in range(epochs):
         opt.zero_grad()
-        t_col = torch.rand(n_col, 1) * t_max
-        t_col.requires_grad_(True)
+
+        # Adaptive resampling every 500 epochs
+        if adaptive and (ep % 500 == 0):
+            model.eval()
+            cached_t_col = _sample_adaptive_1d(
+                model,
+                lambda m, t: _orbital_pointwise_residual(m, t, GM),
+                n_col, t_max)
+            model.train()
+        if adaptive and cached_t_col is not None:
+            t_col = cached_t_col.clone().requires_grad_(True)
+        else:
+            t_col = torch.rand(n_col, 1) * t_max
+            t_col.requires_grad_(True)
 
         out = model(t_col)
         x, y, vx, vy = out[:, 0:1], out[:, 1:2], out[:, 2:3], out[:, 3:4]
@@ -337,6 +412,10 @@ if sim_tab == "Pendulum":
     p_tmax   = st.sidebar.slider("Time span (s)", 2.0, 20.0, 10.0, 1.0)
     p_epochs = st.sidebar.select_slider(
         "Training epochs", options=[1000, 2000, 3000, 5000, 8000], value=3000)
+    p_adaptive = st.sidebar.checkbox(
+        "Adaptive Sampling", value=False, key="p_adaptive",
+        help="Concentrate collocation points where the physics residual is highest. "
+             "Re-evaluates every 500 epochs. 20% of points remain uniform.")
     st.sidebar.caption(
         "More epochs = better accuracy but longer training. "
         "3000 is a good balance.")
@@ -413,6 +492,10 @@ else:
     o_orbits = st.sidebar.slider("Number of orbits", 0.5, 2.0, 1.0, 0.25)
     o_epochs = st.sidebar.select_slider(
         "Training epochs", options=[2000, 3000, 5000, 8000, 12000], value=5000)
+    o_adaptive = st.sidebar.checkbox(
+        "Adaptive Sampling", value=False, key="o_adaptive",
+        help="Concentrate collocation points where the physics residual is highest. "
+             "Re-evaluates every 500 epochs. 20% of points remain uniform.")
     st.sidebar.caption(
         "Higher eccentricity is harder for the PINN — "
         "the velocity spike at perihelion is steep.")
@@ -463,7 +546,7 @@ How well the PINN preserves this is a key quality metric.
         # Train
         model, losses = train_pendulum(
             theta_0, omega_0, p_tmax, g, p_length,
-            epochs=p_epochs)
+            epochs=p_epochs, adaptive=p_adaptive)
 
         # Evaluate
         t_eval = np.linspace(0, p_tmax, 1000)
@@ -1717,7 +1800,8 @@ with a fast perihelion passage that is hard for the PINN to capture.
     if run_btn:
         GM = 1.0
         model, losses, ics, t_max, period = train_orbital(
-            o_ecc, GM, o_orbits, epochs=o_epochs)
+            o_ecc, GM, o_orbits, epochs=o_epochs,
+            adaptive=o_adaptive)
 
         x0, y0, vx0, vy0 = ics
         t_ode, x_o, y_o, vx_o, vy_o = solve_orbit(x0, y0, vx0, vy0, t_max, GM)

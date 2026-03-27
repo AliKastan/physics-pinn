@@ -308,9 +308,64 @@ def setup_orbital_ics(eccentricity=0.5, GM=1.0):
     return x0, y0, vx0, vy0, period
 
 
+# =============================================================================
+# 5a. Adaptive Collocation Sampling
+# =============================================================================
+
+def compute_pointwise_residual(model, t_points, GM=1.0):
+    """
+    Compute per-point ODE residual magnitude (detached) for adaptive sampling.
+    """
+    t_points = t_points.clone().requires_grad_(True)
+    output = model(t_points)
+    x, y, vx, vy = output[:, 0:1], output[:, 1:2], output[:, 2:3], output[:, 3:4]
+
+    ones = torch.ones_like(x)
+    dx_dt = torch.autograd.grad(x, t_points, ones, create_graph=False)[0]
+    dy_dt = torch.autograd.grad(y, t_points, ones, create_graph=False)[0]
+    dvx_dt = torch.autograd.grad(vx, t_points, ones, create_graph=False)[0]
+    dvy_dt = torch.autograd.grad(vy, t_points, ones, create_graph=False)[0]
+
+    r = torch.sqrt(x ** 2 + y ** 2 + 1e-8)
+    r3 = r ** 3
+
+    res = ((dx_dt - vx)**2 + (dy_dt - vy)**2 +
+           (dvx_dt + GM * x / r3)**2 + (dvy_dt + GM * y / r3)**2).squeeze()
+    return res.detach()
+
+
+def sample_adaptive_collocation(model, n_collocation, t_max, GM=1.0,
+                                n_grid=1000, uniform_fraction=0.2):
+    """
+    Sample collocation points with probability proportional to residual magnitude.
+
+    A fixed fraction of uniform random points prevents degenerate clustering.
+    """
+    t_grid = torch.linspace(0, t_max, n_grid).unsqueeze(1)
+
+    with torch.no_grad():
+        residuals = compute_pointwise_residual(model, t_grid, GM=GM)
+
+    probs = residuals / (residuals.sum() + 1e-16)
+
+    n_adaptive = int(n_collocation * (1 - uniform_fraction))
+    n_uniform = n_collocation - n_adaptive
+
+    idx = torch.multinomial(probs, n_adaptive, replacement=True)
+    t_adaptive = t_grid[idx]
+    t_uniform = torch.rand(n_uniform, 1) * t_max
+
+    return torch.cat([t_adaptive, t_uniform], dim=0)
+
+
+# =============================================================================
+# 5b. Training
+# =============================================================================
+
 def train_pinn_orbital(eccentricity=0.3, GM=1.0, n_orbits=1.0,
                        n_collocation=800, epochs=8000, lr=1e-3,
-                       ic_weight=50.0):
+                       ic_weight=50.0, adaptive=False,
+                       adaptive_interval=500, uniform_fraction=0.2):
     """
     Train the orbital PINN.
 
@@ -330,20 +385,27 @@ def train_pinn_orbital(eccentricity=0.3, GM=1.0, n_orbits=1.0,
         epochs: Number of training epochs
         lr: Initial learning rate
         ic_weight: Weight for initial condition loss
+        adaptive: If True, use residual-based adaptive collocation sampling
+        adaptive_interval: Re-evaluate residual distribution every N epochs
+        uniform_fraction: Fraction of uniform random points when adaptive=True
 
     Returns:
-        model, loss_history, ics, t_max
+        model, loss_history, ics, t_max, collocation_snapshots
     """
     x0, y0, vx0, vy0, period = setup_orbital_ics(eccentricity, GM)
     t_max = n_orbits * period
 
-    print(f"Training PINN for orbital mechanics")
+    mode_str = "adaptive" if adaptive else "uniform"
+    print(f"Training PINN for orbital mechanics ({mode_str} sampling)")
     print(f"  Eccentricity: {eccentricity}")
     print(f"  Orbital period: {period:.4f}")
     print(f"  Simulation time: {t_max:.4f} ({n_orbits} orbit(s))")
     print(f"  Perihelion: r = {x0:.4f}, v = {vy0:.4f}")
     print(f"  Collocation points: {n_collocation}")
     print(f"  Epochs: {epochs}")
+    if adaptive:
+        print(f"  Adaptive interval: every {adaptive_interval} epochs")
+        print(f"  Uniform fraction: {uniform_fraction:.0%}")
     print("-" * 55)
 
     model = PINNOrbital()
@@ -359,12 +421,27 @@ def train_pinn_orbital(eccentricity=0.3, GM=1.0, n_orbits=1.0,
     vy0_t = torch.tensor(vy0, dtype=torch.float32)
 
     loss_history = []
+    collocation_snapshots = {}
+    cached_t_col = None
 
     for epoch in range(epochs):
         optimizer.zero_grad()
 
-        # Random collocation points in [0, t_max]
-        t_col = torch.rand(n_collocation, 1) * t_max
+        # --- Collocation point sampling ---
+        if adaptive and (epoch % adaptive_interval == 0):
+            model.eval()
+            cached_t_col = sample_adaptive_collocation(
+                model, n_collocation, t_max, GM=GM,
+                uniform_fraction=uniform_fraction
+            )
+            model.train()
+        if adaptive and cached_t_col is not None:
+            t_col = cached_t_col.clone()
+        else:
+            t_col = torch.rand(n_collocation, 1) * t_max
+
+        if epoch in (0, epochs // 2, epochs - 1):
+            collocation_snapshots[epoch] = t_col.detach().numpy().flatten()
 
         loss_phys = physics_loss(model, t_col, GM=GM)
         loss_ic = initial_condition_loss(model, x0_t, y0_t, vx0_t, vy0_t)
@@ -387,7 +464,7 @@ def train_pinn_orbital(eccentricity=0.3, GM=1.0, n_orbits=1.0,
     print(f"Final loss: {loss_history[-1]:.6f}")
 
     ics = (x0, y0, vx0, vy0)
-    return model, loss_history, ics, t_max
+    return model, loss_history, ics, t_max, collocation_snapshots
 
 
 # =============================================================================
@@ -560,7 +637,7 @@ if __name__ == '__main__':
     eccentricity = 0.3
 
     # Train for one full orbit
-    model, loss_history, ics, t_max = train_pinn_orbital(
+    model, loss_history, ics, t_max, _ = train_pinn_orbital(
         eccentricity=eccentricity,
         GM=GM,
         n_orbits=1.0,

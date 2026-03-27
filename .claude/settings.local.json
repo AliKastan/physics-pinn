@@ -6,7 +6,9 @@
       "Bash(py -c \"import ast; ast.parse\\(open\\(''app.py''\\).read\\(\\)\\); print\\(''app.py: OK''\\)\")",
       "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_inverse.py''\\).read\\(\\)\\); print\\(''pinn_inverse.py: OK''\\)\")",
       "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_pde.py''\\).read\\(\\)\\); print\\(''pinn_pde.py: OK''\\)\")",
-      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_threebody.py''\\).read\\(\\)\\); print\\(''pinn_threebody.py: OK''\\)\")"
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_threebody.py''\\).read\\(\\)\\); print\\(''pinn_threebody.py: OK''\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_pendulum.py''\\).read\\(\\)\\); print\\(''pinn_pendulum.py: OK''\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_orbital.py''\\).read\\(\\)\\); print\\(''pinn_orbital.py: OK''\\)\")"
     ]
   }
 }
