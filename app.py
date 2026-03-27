@@ -75,6 +75,20 @@ class HamiltonianNet(nn.Module):
         return dH_dp, -dH_dq  # dq/dt, dp/dt
 
 
+class PINNPDE(nn.Module):
+    """Maps (x, t) -> u for PDE solving."""
+    def __init__(self, hidden_size=64, num_hidden_layers=4):
+        super().__init__()
+        layers = [nn.Linear(2, hidden_size), nn.Tanh()]
+        for _ in range(num_hidden_layers - 1):
+            layers += [nn.Linear(hidden_size, hidden_size), nn.Tanh()]
+        layers.append(nn.Linear(hidden_size, 1))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x, t):
+        return self.network(torch.cat([x, t], dim=1))
+
+
 # ===========================================================================
 # Training helpers
 # ===========================================================================
@@ -296,7 +310,8 @@ st.sidebar.title("PINN Parameters")
 
 sim_tab = st.sidebar.radio(
     "Simulation",
-    ["Pendulum", "HNN Pendulum", "Orbital Mechanics", "Inverse Problem"],
+    ["Pendulum", "HNN Pendulum", "Orbital Mechanics", "Inverse Problem",
+     "PDE Solver"],
     index=0)
 
 st.sidebar.markdown("---")
@@ -348,6 +363,24 @@ elif sim_tab == "Inverse Problem":
     st.sidebar.caption(
         "Inverse PINNs infer unknown physical parameters from noisy data. "
         "More noise requires more epochs.")
+elif sim_tab == "PDE Solver":
+    st.sidebar.subheader("PDE Solver Settings")
+    pde_mode = st.sidebar.radio("Equation", ["Heat Equation", "Wave Equation"],
+                                 key="pde_mode")
+    if pde_mode == "Heat Equation":
+        pde_alpha = st.sidebar.slider(
+            "Thermal diffusivity (alpha)", 0.001, 0.1, 0.01, 0.001,
+            format="%.3f", key="pde_alpha")
+    else:
+        pde_c = st.sidebar.slider(
+            "Wave speed (c)", 0.5, 3.0, 1.0, 0.1, key="pde_c")
+    pde_epochs = st.sidebar.select_slider(
+        "Training epochs",
+        options=[3000, 5000, 8000, 12000, 15000], value=8000,
+        key="pde_epochs")
+    st.sidebar.caption(
+        "PDE PINNs take (x, t) as input and learn u(x, t) by enforcing "
+        "the PDE, boundary conditions, and initial conditions.")
 else:
     st.sidebar.subheader("Orbital Settings")
     o_ecc    = st.sidebar.slider("Eccentricity", 0.0, 0.85, 0.3, 0.05)
@@ -1058,6 +1091,296 @@ parameterized by $GM$ alone.
                 xaxis_title="Epoch", yaxis_title="Loss",
                 yaxis_type="log", template="plotly_white", height=400)
             c2.plotly_chart(fig_loss, use_container_width=True)
+
+    else:
+        st.info("Adjust parameters in the sidebar, then click **Train & Compare**.")
+
+
+# ---------------------------------------------------------------------------
+# PDE Solver tab
+# ---------------------------------------------------------------------------
+elif sim_tab == "PDE Solver":
+    st.header("PDE Solver — Heat & Wave Equations")
+
+    with st.expander("The Physics", expanded=False):
+        st.markdown(r"""
+**1D Heat Equation** (parabolic — diffusion):
+
+$$\frac{\partial u}{\partial t} = \alpha \frac{\partial^2 u}{\partial x^2}$$
+
+Domain $x \in [0,1]$, $t \in [0,1]$. Boundary conditions $u(0,t) = u(1,t) = 0$.
+Initial condition $u(x,0) = \sin(\pi x)$.
+Exact solution: $u(x,t) = e^{-\alpha \pi^2 t} \sin(\pi x)$.
+
+**1D Wave Equation** (hyperbolic — oscillation):
+
+$$\frac{\partial^2 u}{\partial t^2} = c^2 \frac{\partial^2 u}{\partial x^2}$$
+
+Domain $x \in [0,1]$, $t \in [0,0.5]$. BCs $u(0,t) = u(1,t) = 0$.
+ICs $u(x,0) = \sin(\pi x)$, $\partial u/\partial t(x,0) = 0$.
+Exact solution: $u(x,t) = \cos(c\pi t) \sin(\pi x)$.
+
+The PINN takes $(x, t)$ as input and outputs $u$. All derivatives
+($\partial u/\partial t$, $\partial^2 u/\partial x^2$, etc.) are computed
+via PyTorch autograd.
+        """)
+
+    if run_btn:
+        if pde_mode == "Heat Equation":
+            alpha_val = pde_alpha
+
+            model = PINNPDE()
+            opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                opt, patience=500, factor=0.5, min_lr=1e-6)
+            losses = []
+            progress = st.progress(0, text="Training heat equation PINN...")
+
+            for ep in range(pde_epochs):
+                opt.zero_grad()
+
+                # Interior
+                x_int = torch.rand(2000, 1, requires_grad=True)
+                t_int = torch.rand(2000, 1, requires_grad=True)
+                u = model(x_int, t_int)
+
+                du_dt = torch.autograd.grad(
+                    u, t_int, torch.ones_like(u), create_graph=True)[0]
+                du_dx = torch.autograd.grad(
+                    u, x_int, torch.ones_like(u), create_graph=True)[0]
+                d2u_dx2 = torch.autograd.grad(
+                    du_dx, x_int, torch.ones_like(du_dx), create_graph=True)[0]
+
+                loss_pde = torch.mean((du_dt - alpha_val * d2u_dx2) ** 2)
+
+                # BCs
+                t_bc = torch.rand(200, 1)
+                loss_bc = (torch.mean(model(torch.zeros(200, 1), t_bc) ** 2) +
+                           torch.mean(model(torch.ones(200, 1), t_bc) ** 2))
+
+                # IC
+                x_ic = torch.rand(200, 1)
+                u_ic = model(x_ic, torch.zeros(200, 1))
+                loss_ic = torch.mean(
+                    (u_ic - torch.sin(np.pi * x_ic)) ** 2)
+
+                total = loss_pde + 10.0 * loss_bc + 10.0 * loss_ic
+                total.backward()
+                opt.step()
+                sched.step(total.item())
+                losses.append(total.item())
+
+                if (ep + 1) % 100 == 0:
+                    progress.progress(
+                        (ep + 1) / pde_epochs,
+                        text=f"Epoch {ep+1}/{pde_epochs}  |  "
+                             f"Loss: {total.item():.6f}")
+
+            progress.empty()
+
+            # Evaluate on grid
+            nx, nt = 100, 100
+            x_np = np.linspace(0, 1, nx)
+            t_np = np.linspace(0, 1, nt)
+            X, T = np.meshgrid(x_np, t_np)
+
+            model.eval()
+            with torch.no_grad():
+                xf = torch.tensor(
+                    X.flatten(), dtype=torch.float32).unsqueeze(1)
+                tf = torch.tensor(
+                    T.flatten(), dtype=torch.float32).unsqueeze(1)
+                U_pinn = model(xf, tf).numpy().reshape(X.shape)
+
+            U_exact = (np.exp(-alpha_val * np.pi**2 * T) *
+                       np.sin(np.pi * X))
+            U_err = np.abs(U_pinn - U_exact)
+
+            # Metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Final Loss", f"{losses[-1]:.2e}")
+            col2.metric("Max |Error|", f"{np.max(U_err):.2e}")
+            col3.metric("Mean |Error|", f"{np.mean(U_err):.2e}")
+
+            # Heatmaps
+            c1, c2, c3 = st.columns(3)
+
+            fig_p = go.Figure(data=go.Heatmap(
+                z=U_pinn, x=x_np, y=t_np,
+                colorscale='Hot', colorbar=dict(title='u')))
+            fig_p.update_layout(
+                title="PINN u(x,t)",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c1.plotly_chart(fig_p, use_container_width=True)
+
+            fig_e = go.Figure(data=go.Heatmap(
+                z=U_exact, x=x_np, y=t_np,
+                colorscale='Hot', colorbar=dict(title='u')))
+            fig_e.update_layout(
+                title="Exact u(x,t)",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c2.plotly_chart(fig_e, use_container_width=True)
+
+            fig_err = go.Figure(data=go.Heatmap(
+                z=U_err, x=x_np, y=t_np,
+                colorscale='Viridis', colorbar=dict(title='|err|')))
+            fig_err.update_layout(
+                title=f"Absolute Error (max: {np.max(U_err):.2e})",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c3.plotly_chart(fig_err, use_container_width=True)
+
+            # Training loss
+            with st.expander("Training Loss Curve"):
+                fig_loss = go.Figure()
+                fig_loss.add_trace(go.Scatter(
+                    y=losses, mode='lines',
+                    line=dict(color=C_ACCENT, width=1.5)))
+                fig_loss.update_layout(
+                    xaxis_title="Epoch", yaxis_title="Loss",
+                    yaxis_type="log", template="plotly_white", height=350)
+                st.plotly_chart(fig_loss, use_container_width=True)
+
+        else:
+            # Wave equation
+            c_val = pde_c
+            t_max_w = 0.5
+
+            model = PINNPDE()
+            opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+            sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                opt, patience=500, factor=0.5, min_lr=1e-6)
+            losses = []
+            progress = st.progress(0, text="Training wave equation PINN...")
+
+            for ep in range(pde_epochs):
+                opt.zero_grad()
+
+                # Interior
+                x_int = torch.rand(2000, 1, requires_grad=True)
+                t_int = torch.rand(2000, 1, requires_grad=True) * t_max_w
+                u = model(x_int, t_int)
+
+                du_dt = torch.autograd.grad(
+                    u, t_int, torch.ones_like(u), create_graph=True)[0]
+                d2u_dt2 = torch.autograd.grad(
+                    du_dt, t_int, torch.ones_like(du_dt),
+                    create_graph=True)[0]
+                du_dx = torch.autograd.grad(
+                    u, x_int, torch.ones_like(u), create_graph=True)[0]
+                d2u_dx2 = torch.autograd.grad(
+                    du_dx, x_int, torch.ones_like(du_dx),
+                    create_graph=True)[0]
+
+                loss_pde = torch.mean(
+                    (d2u_dt2 - c_val**2 * d2u_dx2) ** 2)
+
+                # BCs
+                t_bc = torch.rand(200, 1) * t_max_w
+                loss_bc = (
+                    torch.mean(model(torch.zeros(200, 1), t_bc) ** 2) +
+                    torch.mean(model(torch.ones(200, 1), t_bc) ** 2))
+
+                # IC: u(x,0) = sin(pi*x)
+                x_ic = torch.rand(200, 1)
+                u_ic = model(x_ic, torch.zeros(200, 1))
+                loss_ic_u = torch.mean(
+                    (u_ic - torch.sin(np.pi * x_ic)) ** 2)
+
+                # IC: du/dt(x,0) = 0
+                x_ic2 = torch.rand(200, 1)
+                t_ic2 = torch.zeros(200, 1, requires_grad=True)
+                u_ic2 = model(x_ic2, t_ic2)
+                du_dt_ic = torch.autograd.grad(
+                    u_ic2, t_ic2, torch.ones_like(u_ic2),
+                    create_graph=True)[0]
+                loss_ic_v = torch.mean(du_dt_ic ** 2)
+
+                total = (loss_pde + 10.0 * loss_bc +
+                         10.0 * (loss_ic_u + loss_ic_v))
+                total.backward()
+                opt.step()
+                sched.step(total.item())
+                losses.append(total.item())
+
+                if (ep + 1) % 100 == 0:
+                    progress.progress(
+                        (ep + 1) / pde_epochs,
+                        text=f"Epoch {ep+1}/{pde_epochs}  |  "
+                             f"Loss: {total.item():.6f}")
+
+            progress.empty()
+
+            # Evaluate on grid
+            nx, nt = 100, 100
+            x_np = np.linspace(0, 1, nx)
+            t_np = np.linspace(0, t_max_w, nt)
+            X, T = np.meshgrid(x_np, t_np)
+
+            model.eval()
+            with torch.no_grad():
+                xf = torch.tensor(
+                    X.flatten(), dtype=torch.float32).unsqueeze(1)
+                tf = torch.tensor(
+                    T.flatten(), dtype=torch.float32).unsqueeze(1)
+                U_pinn = model(xf, tf).numpy().reshape(X.shape)
+
+            U_exact = (np.cos(c_val * np.pi * T) *
+                       np.sin(np.pi * X))
+            U_err = np.abs(U_pinn - U_exact)
+
+            # Metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Final Loss", f"{losses[-1]:.2e}")
+            col2.metric("Max |Error|", f"{np.max(U_err):.2e}")
+            col3.metric("Mean |Error|", f"{np.mean(U_err):.2e}")
+
+            # Heatmaps — use diverging colorscale for wave (has negatives)
+            vmax = max(np.max(np.abs(U_pinn)), np.max(np.abs(U_exact)))
+            c1, c2, c3 = st.columns(3)
+
+            fig_p = go.Figure(data=go.Heatmap(
+                z=U_pinn, x=x_np, y=t_np,
+                colorscale='RdBu_r', zmid=0, zmin=-vmax, zmax=vmax,
+                colorbar=dict(title='u')))
+            fig_p.update_layout(
+                title="PINN u(x,t)",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c1.plotly_chart(fig_p, use_container_width=True)
+
+            fig_e = go.Figure(data=go.Heatmap(
+                z=U_exact, x=x_np, y=t_np,
+                colorscale='RdBu_r', zmid=0, zmin=-vmax, zmax=vmax,
+                colorbar=dict(title='u')))
+            fig_e.update_layout(
+                title="Exact u(x,t)",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c2.plotly_chart(fig_e, use_container_width=True)
+
+            fig_err = go.Figure(data=go.Heatmap(
+                z=U_err, x=x_np, y=t_np,
+                colorscale='Viridis',
+                colorbar=dict(title='|err|')))
+            fig_err.update_layout(
+                title=f"Absolute Error (max: {np.max(U_err):.2e})",
+                xaxis_title="x", yaxis_title="t",
+                template="plotly_white", height=400)
+            c3.plotly_chart(fig_err, use_container_width=True)
+
+            # Training loss
+            with st.expander("Training Loss Curve"):
+                fig_loss = go.Figure()
+                fig_loss.add_trace(go.Scatter(
+                    y=losses, mode='lines',
+                    line=dict(color=C_ACCENT, width=1.5)))
+                fig_loss.update_layout(
+                    xaxis_title="Epoch", yaxis_title="Loss",
+                    yaxis_type="log", template="plotly_white", height=350)
+                st.plotly_chart(fig_loss, use_container_width=True)
 
     else:
         st.info("Adjust parameters in the sidebar, then click **Train & Compare**.")
