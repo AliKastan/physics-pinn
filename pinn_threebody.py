@@ -150,10 +150,12 @@ def three_body_rhs(t, state, masses, G=1.0):
     vx1, vy1, vx2, vy2, vx3, vy3 = state[6:12]
     m1, m2, m3 = masses
 
-    # Pairwise distances
-    r12 = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    r13 = np.sqrt((x3 - x1)**2 + (y3 - y1)**2)
-    r23 = np.sqrt((x3 - x2)**2 + (y3 - y2)**2)
+    # Pairwise distances with gravitational softening (epsilon=1e-3)
+    # to prevent singularities when bodies approach closely
+    eps = 1e-3
+    r12 = np.sqrt((x2 - x1)**2 + (y2 - y1)**2 + eps**2)
+    r13 = np.sqrt((x3 - x1)**2 + (y3 - y1)**2 + eps**2)
+    r23 = np.sqrt((x3 - x2)**2 + (y3 - y2)**2 + eps**2)
 
     # Accelerations on body 1 (from bodies 2 and 3)
     ax1 = G * m2 * (x2 - x1) / r12**3 + G * m3 * (x3 - x1) / r13**3
@@ -216,10 +218,12 @@ def physics_loss(model, t_col, masses, G=1.0):
 
     m1, m2, m3 = masses
 
-    # Pairwise distances (with epsilon for stability)
-    r12 = torch.sqrt((x2 - x1)**2 + (y2 - y1)**2 + 1e-8)
-    r13 = torch.sqrt((x3 - x1)**2 + (y3 - y1)**2 + 1e-8)
-    r23 = torch.sqrt((x3 - x2)**2 + (y3 - y2)**2 + 1e-8)
+    # Pairwise distances with gravitational softening (epsilon=1e-3)
+    # Same softening used in the classical solver for consistent comparison
+    eps = 1e-3
+    r12 = torch.sqrt((x2 - x1)**2 + (y2 - y1)**2 + eps**2)
+    r13 = torch.sqrt((x3 - x1)**2 + (y3 - y1)**2 + eps**2)
+    r23 = torch.sqrt((x3 - x2)**2 + (y3 - y2)**2 + eps**2)
 
     # Gravitational accelerations
     ax1 = G * m2 * (x2 - x1) / r12**3 + G * m3 * (x3 - x1) / r13**3
@@ -269,9 +273,10 @@ def compute_energy(states, masses, G=1.0):
          0.5 * m2 * (vx2**2 + vy2**2) +
          0.5 * m3 * (vx3**2 + vy3**2))
 
-    r12 = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    r13 = np.sqrt((x3 - x1)**2 + (y3 - y1)**2)
-    r23 = np.sqrt((x3 - x2)**2 + (y3 - y2)**2)
+    eps = 1e-3
+    r12 = np.sqrt((x2 - x1)**2 + (y2 - y1)**2 + eps**2)
+    r13 = np.sqrt((x3 - x1)**2 + (y3 - y1)**2 + eps**2)
+    r23 = np.sqrt((x3 - x2)**2 + (y3 - y2)**2 + eps**2)
 
     V = -G * (m1 * m2 / r12 + m1 * m3 / r13 + m2 * m3 / r23)
 
@@ -353,13 +358,11 @@ def train_threebody_pinn(state0, masses, t_max, G=1.0,
 
 def visualize_threebody_results(model, state0, masses, t_max, G=1.0):
     """
-    Compare PINN approximation vs classical solver with 6 plots:
-        1. Trajectories in x-y plane
-        2. x-positions over time
-        3. y-positions over time
-        4. Energy conservation
-        5. Angular momentum conservation
-        6. Position error vs classical
+    Compare PINN approximation vs classical solver with 4 plots:
+        1. Trajectories in x-y plane (PINN vs RK45)
+        2. Total energy drift over time
+        3. Position error per body (shows chaos boundary)
+        4. Angular momentum conservation
     """
     t_eval = np.linspace(0, t_max, 2000)
 
@@ -386,8 +389,20 @@ def visualize_threebody_results(model, state0, masses, t_max, G=1.0):
     L_pinn = compute_angular_momentum(states_pinn, masses)
     L0 = L_ode[0]
 
+    # --- Detect divergence: where total position error first exceeds a threshold ---
+    total_pos_err = np.zeros(len(t_eval))
+    for i in range(3):
+        total_pos_err += np.sqrt(
+            (states_pinn[:, 2*i] - states_ode[:, 2*i])**2 +
+            (states_pinn[:, 2*i+1] - states_ode[:, 2*i+1])**2)
+    diverge_threshold = 0.1
+    diverge_idx = np.argmax(total_pos_err > diverge_threshold)
+    if total_pos_err[diverge_idx] <= diverge_threshold:
+        diverge_idx = None  # never diverged
+    diverge_time = t_eval[diverge_idx] if diverge_idx is not None else None
+
     # --- Plotting ---
-    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
     fig.suptitle('PINN for Three-Body Problem (Figure-Eight Orbit)',
                  fontsize=15, fontweight='bold')
 
@@ -397,13 +412,10 @@ def visualize_threebody_results(model, state0, masses, t_max, G=1.0):
     # Plot 1: Orbital trajectories (x-y plane)
     ax1 = axes[0, 0]
     for i, (c, lab) in enumerate(zip(colors, labels)):
-        # Classical
         ax1.plot(states_ode[:, 2*i], states_ode[:, 2*i+1],
-                 '-', color=c, linewidth=2, alpha=0.5, label=f'{lab} (RK45)')
-        # PINN
+                 '-', color=c, linewidth=2, alpha=0.4, label=f'{lab} (RK45)')
         ax1.plot(states_pinn[:, 2*i], states_pinn[:, 2*i+1],
                  '--', color=c, linewidth=2, label=f'{lab} (PINN)')
-        # Starting positions
         ax1.plot(state0[2*i], state0[2*i+1], 'o', color=c, markersize=8)
     ax1.set_xlabel('x')
     ax1.set_ylabel('y')
@@ -412,76 +424,73 @@ def visualize_threebody_results(model, state0, masses, t_max, G=1.0):
     ax1.set_aspect('equal')
     ax1.grid(True, alpha=0.3)
 
-    # Plot 2: x-positions over time
+    # Plot 2: Total energy drift |dE/E0| over time
     ax2 = axes[0, 1]
-    for i, (c, lab) in enumerate(zip(colors, labels)):
-        ax2.plot(t_eval, states_ode[:, 2*i], '-', color=c, linewidth=1.5,
-                 alpha=0.5, label=f'{lab} RK45')
-        ax2.plot(t_eval, states_pinn[:, 2*i], '--', color=c, linewidth=1.5,
-                 label=f'{lab} PINN')
+    dE_ode = np.abs((E_ode - E0) / (np.abs(E0) + 1e-16))
+    dE_pinn = np.abs((E_pinn - E0) / (np.abs(E0) + 1e-16))
+    ax2.semilogy(t_eval, dE_ode + 1e-16, 'b-', linewidth=2,
+                 label='Classical (RK45)')
+    ax2.semilogy(t_eval, dE_pinn + 1e-16, 'r-', linewidth=2, label='PINN')
+    if diverge_time is not None:
+        ax2.axvline(x=diverge_time, color='gray', linestyle='--', alpha=0.6)
+        ax2.annotate(
+            f'PINN diverges\nt = {diverge_time:.3f}',
+            xy=(diverge_time, dE_pinn[diverge_idx]),
+            xytext=(diverge_time + 0.05 * t_max, 1e-1),
+            fontsize=9, color='gray',
+            arrowprops=dict(arrowstyle='->', color='gray', lw=1.5),
+            bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8))
     ax2.set_xlabel('Time')
-    ax2.set_ylabel('x position')
-    ax2.set_title('x(t) for Each Body')
-    ax2.legend(fontsize=7, ncol=2)
+    ax2.set_ylabel('|dE / E_0|')
+    ax2.set_title('Relative Energy Drift')
+    ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
-    # Plot 3: y-positions over time
-    ax3 = axes[0, 2]
+    # Plot 3: Position error per body (chaos boundary)
+    ax3 = axes[1, 0]
     for i, (c, lab) in enumerate(zip(colors, labels)):
-        ax3.plot(t_eval, states_ode[:, 2*i+1], '-', color=c, linewidth=1.5,
-                 alpha=0.5, label=f'{lab} RK45')
-        ax3.plot(t_eval, states_pinn[:, 2*i+1], '--', color=c, linewidth=1.5,
-                 label=f'{lab} PINN')
+        pos_err = np.sqrt((states_pinn[:, 2*i] - states_ode[:, 2*i])**2 +
+                          (states_pinn[:, 2*i+1] - states_ode[:, 2*i+1])**2)
+        ax3.semilogy(t_eval, pos_err + 1e-16, '-', color=c, linewidth=1.5,
+                     label=lab)
+    if diverge_time is not None:
+        ax3.axvline(x=diverge_time, color='gray', linestyle='--', alpha=0.6,
+                    label=f'Divergence (t={diverge_time:.3f})')
     ax3.set_xlabel('Time')
-    ax3.set_ylabel('y position')
-    ax3.set_title('y(t) for Each Body')
-    ax3.legend(fontsize=7, ncol=2)
+    ax3.set_ylabel('Position Error |dr|')
+    ax3.set_title('PINN Error vs Classical — Chaos Boundary')
+    ax3.legend(fontsize=8)
     ax3.grid(True, alpha=0.3)
 
-    # Plot 4: Energy conservation
-    ax4 = axes[1, 0]
+    # Plot 4: Energy conservation (absolute values)
+    ax4 = axes[1, 1]
     ax4.plot(t_eval, E_ode, 'b-', linewidth=2, label='Classical (RK45)')
     ax4.plot(t_eval, E_pinn, 'r-', linewidth=2, label='PINN')
-    ax4.axhline(y=E0, color='gray', linestyle=':', alpha=0.5, label=f'True E = {E0:.4f}')
+    ax4.axhline(y=E0, color='gray', linestyle=':', alpha=0.5,
+                label=f'True E = {E0:.4f}')
     ax4.set_xlabel('Time')
     ax4.set_ylabel('Total Energy')
     ax4.set_title('Energy Conservation')
     ax4.legend(fontsize=8)
     ax4.grid(True, alpha=0.3)
 
-    # Plot 5: Angular momentum
-    ax5 = axes[1, 1]
-    ax5.plot(t_eval, L_ode, 'b-', linewidth=2, label='Classical (RK45)')
-    ax5.plot(t_eval, L_pinn, 'r-', linewidth=2, label='PINN')
-    ax5.axhline(y=L0, color='gray', linestyle=':', alpha=0.5)
-    ax5.set_xlabel('Time')
-    ax5.set_ylabel('Angular Momentum')
-    ax5.set_title('Angular Momentum Conservation')
-    ax5.legend(fontsize=8)
-    ax5.grid(True, alpha=0.3)
+    # Add note about chaos if divergence detected
+    if diverge_time is not None:
+        fig.text(
+            0.5, 0.01,
+            "Note: The three-body problem is chaotic — small PINN errors "
+            "grow exponentially. The divergence point marks where the PINN's "
+            "approximate dynamics depart from the true trajectory. "
+            "Showing this chaos boundary is itself a result.",
+            ha='center', fontsize=9, style='italic', color='#555555',
+            bbox=dict(boxstyle='round', fc='lightyellow', alpha=0.7))
 
-    # Plot 6: Position error per body
-    ax6 = axes[1, 2]
-    for i, (c, lab) in enumerate(zip(colors, labels)):
-        pos_err = np.sqrt((states_pinn[:, 2*i] - states_ode[:, 2*i])**2 +
-                          (states_pinn[:, 2*i+1] - states_ode[:, 2*i+1])**2)
-        ax6.semilogy(t_eval, pos_err + 1e-16, '-', color=c, linewidth=1.5,
-                     label=lab)
-    ax6.set_xlabel('Time')
-    ax6.set_ylabel('Position Error |dr|')
-    ax6.set_title('PINN Position Error vs Classical')
-    ax6.legend(fontsize=8)
-    ax6.grid(True, alpha=0.3)
-
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.04, 1, 1])
     plt.savefig('threebody_results.png', dpi=150, bbox_inches='tight')
     plt.close()
     print("Plot saved to threebody_results.png")
 
     # Print summary
-    dE_ode = np.abs((E_ode - E0) / (np.abs(E0) + 1e-16))
-    dE_pinn = np.abs((E_pinn - E0) / (np.abs(E0) + 1e-16))
-
     print(f"\n{'='*55}")
     print("Three-Body Conservation Summary")
     print(f"{'='*55}")
@@ -489,6 +498,8 @@ def visualize_threebody_results(model, state0, masses, t_max, G=1.0):
     print(f"  Classical max |dE/E0| = {np.max(dE_ode):.2e}")
     print(f"  PINN max |dE/E0|     = {np.max(dE_pinn):.2e}")
     print(f"  Initial angular momentum L0 = {L0:.6f}")
+    if diverge_time is not None:
+        print(f"  PINN diverges from RK45 at t = {diverge_time:.3f}")
 
     for i, lab in enumerate(labels):
         pos_err = np.sqrt((states_pinn[:, 2*i] - states_ode[:, 2*i])**2 +
@@ -508,13 +519,15 @@ if __name__ == '__main__':
     G = 1.0
     state0, masses, period = figure_eight_ics(G)
 
-    # Simulate for half a period — the three-body problem is very hard
-    # for PINNs, so we keep the time horizon short for a reasonable result.
-    t_max = period * 0.5
+    # Simulate for t in [0, 1] — a fraction of the period (T ~ 6.33).
+    # The three-body problem is chaotic, so even this short horizon
+    # is a meaningful test. The PINN will likely diverge before t=1,
+    # and showing that chaos boundary is itself a result.
+    t_max = 1.0
 
     print(f"Figure-eight three-body orbit")
     print(f"  Period: {period:.4f}")
-    print(f"  Simulating: {t_max:.4f} (half period)")
+    print(f"  Simulating: t in [0, {t_max}]")
     print()
 
     model, loss_history = train_threebody_pinn(

@@ -89,6 +89,20 @@ class PINNPDE(nn.Module):
         return self.network(torch.cat([x, t], dim=1))
 
 
+class PINNThreeBody(nn.Module):
+    """Maps t -> 12 state variables for the three-body problem."""
+    def __init__(self, hidden_size=128, num_hidden_layers=4):
+        super().__init__()
+        layers = [nn.Linear(1, hidden_size), nn.Tanh()]
+        for _ in range(num_hidden_layers - 1):
+            layers += [nn.Linear(hidden_size, hidden_size), nn.Tanh()]
+        layers.append(nn.Linear(hidden_size, 12))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, t):
+        return self.network(t)
+
+
 # ===========================================================================
 # Training helpers
 # ===========================================================================
@@ -311,7 +325,7 @@ st.sidebar.title("PINN Parameters")
 sim_tab = st.sidebar.radio(
     "Simulation",
     ["Pendulum", "HNN Pendulum", "Orbital Mechanics", "Inverse Problem",
-     "PDE Solver"],
+     "PDE Solver", "Three-Body"],
     index=0)
 
 st.sidebar.markdown("---")
@@ -381,6 +395,18 @@ elif sim_tab == "PDE Solver":
     st.sidebar.caption(
         "PDE PINNs take (x, t) as input and learn u(x, t) by enforcing "
         "the PDE, boundary conditions, and initial conditions.")
+elif sim_tab == "Three-Body":
+    st.sidebar.subheader("Three-Body Settings")
+    tb_tmax = st.sidebar.slider("Time horizon", 0.5, 2.0, 1.0, 0.1,
+                                 key="tb_tmax")
+    tb_epochs = st.sidebar.select_slider(
+        "Training epochs",
+        options=[5000, 8000, 10000, 15000, 20000], value=10000,
+        key="tb_epochs")
+    st.sidebar.caption(
+        "The three-body problem is chaotic — small errors grow "
+        "exponentially. The PINN will likely diverge from the true "
+        "trajectory. Showing this chaos boundary is itself a result.")
 else:
     st.sidebar.subheader("Orbital Settings")
     o_ecc    = st.sidebar.slider("Eccentricity", 0.0, 0.85, 0.3, 0.05)
@@ -1381,6 +1407,277 @@ via PyTorch autograd.
                     xaxis_title="Epoch", yaxis_title="Loss",
                     yaxis_type="log", template="plotly_white", height=350)
                 st.plotly_chart(fig_loss, use_container_width=True)
+
+    else:
+        st.info("Adjust parameters in the sidebar, then click **Train & Compare**.")
+
+
+# ---------------------------------------------------------------------------
+# Three-Body tab
+# ---------------------------------------------------------------------------
+elif sim_tab == "Three-Body":
+    st.header("Three-Body Problem — Figure-Eight Orbit")
+
+    with st.expander("The Physics", expanded=False):
+        st.markdown(r"""
+**The three-body problem** is one of the oldest unsolved problems in physics.
+Three masses interact via Newtonian gravity:
+
+$$m_i \frac{d^2 \mathbf{r}_i}{dt^2} = \sum_{j \neq i}
+  \frac{G\,m_i\,m_j\,(\mathbf{r}_j - \mathbf{r}_i)}{|\mathbf{r}_j - \mathbf{r}_i|^3}$$
+
+Unlike the two-body problem, there is **no general closed-form solution**.
+Trajectories can be *chaotic* — tiny perturbations lead to wildly different
+outcomes.
+
+**Figure-eight orbit** (Chenciner & Montgomery, 2000): Three equal masses
+chase each other along a figure-eight path. This is one of very few known
+periodic three-body solutions.
+
+**Why PINNs struggle here:** The chaotic sensitivity means any small error
+in the PINN's approximation grows *exponentially* over time. The point
+where the PINN diverges from the classical solver reveals the **chaos
+boundary** — and showing that boundary is itself a meaningful result.
+
+We add gravitational softening ($\epsilon = 10^{-3}$) to prevent
+singularities when bodies approach closely.
+        """)
+
+    if run_btn:
+        # Figure-eight initial conditions
+        masses = [1.0, 1.0, 1.0]
+        x1_0, y1_0 = -0.97000436, 0.24308753
+        x2_0, y2_0 = 0.97000436, -0.24308753
+        x3_0, y3_0 = 0.0, 0.0
+        vx3_0, vy3_0 = -0.93240737, -0.86473146
+        vx1_0, vy1_0 = -vx3_0 / 2.0, -vy3_0 / 2.0
+        vx2_0, vy2_0 = -vx3_0 / 2.0, -vy3_0 / 2.0
+        state0 = [x1_0, y1_0, x2_0, y2_0, x3_0, y3_0,
+                  vx1_0, vy1_0, vx2_0, vy2_0, vx3_0, vy3_0]
+        state0_t = torch.tensor(state0, dtype=torch.float32)
+
+        G_val = 1.0
+        eps = 1e-3
+        t_max = tb_tmax
+
+        # Train
+        model = PINNThreeBody()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, patience=500, factor=0.5, min_lr=1e-6)
+        losses = []
+        progress = st.progress(0, text="Training three-body PINN...")
+
+        m1, m2, m3 = masses
+
+        for ep in range(tb_epochs):
+            opt.zero_grad()
+
+            t_col = torch.rand(1000, 1) * t_max
+            t_col.requires_grad_(True)
+            out = model(t_col)
+
+            x1, y1 = out[:, 0:1], out[:, 1:2]
+            x2, y2 = out[:, 2:3], out[:, 3:4]
+            x3, y3 = out[:, 4:5], out[:, 5:6]
+            vx1, vy1 = out[:, 6:7], out[:, 7:8]
+            vx2, vy2 = out[:, 8:9], out[:, 9:10]
+            vx3, vy3 = out[:, 10:11], out[:, 11:12]
+
+            ones = torch.ones_like(x1)
+            dx1 = torch.autograd.grad(x1, t_col, ones, create_graph=True)[0]
+            dy1 = torch.autograd.grad(y1, t_col, ones, create_graph=True)[0]
+            dx2 = torch.autograd.grad(x2, t_col, ones, create_graph=True)[0]
+            dy2 = torch.autograd.grad(y2, t_col, ones, create_graph=True)[0]
+            dx3 = torch.autograd.grad(x3, t_col, ones, create_graph=True)[0]
+            dy3 = torch.autograd.grad(y3, t_col, ones, create_graph=True)[0]
+            dvx1 = torch.autograd.grad(vx1, t_col, ones, create_graph=True)[0]
+            dvy1 = torch.autograd.grad(vy1, t_col, ones, create_graph=True)[0]
+            dvx2 = torch.autograd.grad(vx2, t_col, ones, create_graph=True)[0]
+            dvy2 = torch.autograd.grad(vy2, t_col, ones, create_graph=True)[0]
+            dvx3 = torch.autograd.grad(vx3, t_col, ones, create_graph=True)[0]
+            dvy3 = torch.autograd.grad(vy3, t_col, ones, create_graph=True)[0]
+
+            r12 = torch.sqrt((x2-x1)**2 + (y2-y1)**2 + eps**2)
+            r13 = torch.sqrt((x3-x1)**2 + (y3-y1)**2 + eps**2)
+            r23 = torch.sqrt((x3-x2)**2 + (y3-y2)**2 + eps**2)
+
+            ax1 = G_val*(m2*(x2-x1)/r12**3 + m3*(x3-x1)/r13**3)
+            ay1 = G_val*(m2*(y2-y1)/r12**3 + m3*(y3-y1)/r13**3)
+            ax2 = G_val*(m1*(x1-x2)/r12**3 + m3*(x3-x2)/r23**3)
+            ay2 = G_val*(m1*(y1-y2)/r12**3 + m3*(y3-y2)/r23**3)
+            ax3 = G_val*(m1*(x1-x3)/r13**3 + m2*(x2-x3)/r23**3)
+            ay3 = G_val*(m1*(y1-y3)/r13**3 + m2*(y2-y3)/r23**3)
+
+            phys = (torch.mean((dx1-vx1)**2) + torch.mean((dy1-vy1)**2) +
+                    torch.mean((dx2-vx2)**2) + torch.mean((dy2-vy2)**2) +
+                    torch.mean((dx3-vx3)**2) + torch.mean((dy3-vy3)**2) +
+                    torch.mean((dvx1-ax1)**2) + torch.mean((dvy1-ay1)**2) +
+                    torch.mean((dvx2-ax2)**2) + torch.mean((dvy2-ay2)**2) +
+                    torch.mean((dvx3-ax3)**2) + torch.mean((dvy3-ay3)**2))
+
+            t0 = torch.zeros(1, 1)
+            out0 = model(t0).squeeze()
+            ic = torch.sum((out0 - state0_t)**2)
+
+            total = phys + 100.0 * ic
+            total.backward()
+            opt.step()
+            sched.step(total.item())
+            losses.append(total.item())
+
+            if (ep + 1) % 100 == 0:
+                progress.progress(
+                    (ep + 1) / tb_epochs,
+                    text=f"Epoch {ep+1}/{tb_epochs}  |  "
+                         f"Loss: {total.item():.6f}")
+
+        progress.empty()
+
+        # Classical solution
+        def tb_rhs(t, state):
+            x1, y1, x2, y2, x3, y3 = state[0:6]
+            vx1, vy1, vx2, vy2, vx3, vy3 = state[6:12]
+            r12 = np.sqrt((x2-x1)**2+(y2-y1)**2+eps**2)
+            r13 = np.sqrt((x3-x1)**2+(y3-y1)**2+eps**2)
+            r23 = np.sqrt((x3-x2)**2+(y3-y2)**2+eps**2)
+            ax1 = G_val*(m2*(x2-x1)/r12**3+m3*(x3-x1)/r13**3)
+            ay1 = G_val*(m2*(y2-y1)/r12**3+m3*(y3-y1)/r13**3)
+            ax2 = G_val*(m1*(x1-x2)/r12**3+m3*(x3-x2)/r23**3)
+            ay2 = G_val*(m1*(y1-y2)/r12**3+m3*(y3-y2)/r23**3)
+            ax3 = G_val*(m1*(x1-x3)/r13**3+m2*(x2-x3)/r23**3)
+            ay3 = G_val*(m1*(y1-y3)/r13**3+m2*(y2-y3)/r23**3)
+            return [vx1,vy1,vx2,vy2,vx3,vy3,ax1,ay1,ax2,ay2,ax3,ay3]
+
+        t_eval = np.linspace(0, t_max, 1500)
+        sol = solve_ivp(tb_rhs, (0, t_max), state0,
+                        t_eval=t_eval, method='RK45',
+                        rtol=1e-12, atol=1e-14)
+        st_ode = sol.y.T
+
+        model.eval()
+        with torch.no_grad():
+            st_pinn = model(
+                torch.tensor(t_eval, dtype=torch.float32).unsqueeze(1)
+            ).numpy()
+
+        # Energy
+        def tb_energy(s):
+            x1,y1,x2,y2,x3,y3 = [s[:,i] for i in range(6)]
+            vx1,vy1,vx2,vy2,vx3,vy3 = [s[:,i] for i in range(6,12)]
+            T = 0.5*(vx1**2+vy1**2+vx2**2+vy2**2+vx3**2+vy3**2)
+            r12 = np.sqrt((x2-x1)**2+(y2-y1)**2+eps**2)
+            r13 = np.sqrt((x3-x1)**2+(y3-y1)**2+eps**2)
+            r23 = np.sqrt((x3-x2)**2+(y3-y2)**2+eps**2)
+            V = -(1.0/r12 + 1.0/r13 + 1.0/r23)
+            return T + V
+
+        E_ode = tb_energy(st_ode)
+        E_pinn = tb_energy(st_pinn)
+        E0 = E_ode[0]
+        dE_ode = np.abs((E_ode - E0) / (np.abs(E0) + 1e-16))
+        dE_pinn = np.abs((E_pinn - E0) / (np.abs(E0) + 1e-16))
+
+        # Detect divergence
+        tot_err = np.zeros(len(t_eval))
+        for i in range(3):
+            tot_err += np.sqrt(
+                (st_pinn[:,2*i]-st_ode[:,2*i])**2 +
+                (st_pinn[:,2*i+1]-st_ode[:,2*i+1])**2)
+        div_idx = np.argmax(tot_err > 0.1)
+        div_time = t_eval[div_idx] if tot_err[div_idx] > 0.1 else None
+
+        # Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Final Loss", f"{losses[-1]:.2e}")
+        col2.metric("PINN Max |dE/E|", f"{np.max(dE_pinn):.2e}")
+        if div_time is not None:
+            col3.metric("Divergence Time", f"t = {div_time:.3f}")
+        else:
+            col3.metric("Max Position Error", f"{np.max(tot_err):.4f}")
+
+        # Trajectory plot
+        body_colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+        body_names = ["Body 1", "Body 2", "Body 3"]
+
+        fig1 = go.Figure()
+        for i, (bc, bn) in enumerate(zip(body_colors, body_names)):
+            fig1.add_trace(go.Scatter(
+                x=st_ode[:, 2*i], y=st_ode[:, 2*i+1], mode='lines',
+                name=f'{bn} (RK45)',
+                line=dict(color=bc, width=2), opacity=0.4))
+            fig1.add_trace(go.Scatter(
+                x=st_pinn[:, 2*i], y=st_pinn[:, 2*i+1], mode='lines',
+                name=f'{bn} (PINN)',
+                line=dict(color=bc, width=2, dash='dash')))
+            fig1.add_trace(go.Scatter(
+                x=[state0[2*i]], y=[state0[2*i+1]], mode='markers',
+                name=f'{bn} start',
+                marker=dict(color=bc, size=8), showlegend=False))
+        fig1.update_layout(
+            title="Figure-Eight Trajectories — PINN vs Classical",
+            xaxis_title="x", yaxis_title="y",
+            template="plotly_white", height=500,
+            yaxis_scaleanchor="x", yaxis_scaleratio=1)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        # Energy drift + position error
+        c1, c2 = st.columns(2)
+
+        fig_e = go.Figure()
+        fig_e.add_trace(go.Scatter(
+            x=t_eval, y=dE_ode + 1e-16, mode='lines',
+            name='Classical (RK45)',
+            line=dict(color=C_CLASSICAL, width=2)))
+        fig_e.add_trace(go.Scatter(
+            x=t_eval, y=dE_pinn + 1e-16, mode='lines',
+            name='PINN', line=dict(color=C_PINN, width=2)))
+        if div_time is not None:
+            fig_e.add_vline(x=div_time, line_dash="dash",
+                            line_color="gray",
+                            annotation_text=f"Diverges t={div_time:.3f}")
+        fig_e.update_layout(
+            title="Relative Energy Drift |dE/E_0|",
+            xaxis_title="Time", yaxis_title="|dE / E_0|",
+            yaxis_type="log", template="plotly_white", height=400)
+        c1.plotly_chart(fig_e, use_container_width=True)
+
+        fig_pe = go.Figure()
+        for i, (bc, bn) in enumerate(zip(body_colors, body_names)):
+            pe = np.sqrt((st_pinn[:,2*i]-st_ode[:,2*i])**2 +
+                         (st_pinn[:,2*i+1]-st_ode[:,2*i+1])**2)
+            fig_pe.add_trace(go.Scatter(
+                x=t_eval, y=pe + 1e-16, mode='lines',
+                name=bn, line=dict(color=bc, width=2)))
+        if div_time is not None:
+            fig_pe.add_vline(x=div_time, line_dash="dash",
+                             line_color="gray",
+                             annotation_text="Chaos boundary")
+        fig_pe.update_layout(
+            title="PINN Position Error vs Classical",
+            xaxis_title="Time", yaxis_title="|dr|",
+            yaxis_type="log", template="plotly_white", height=400)
+        c2.plotly_chart(fig_pe, use_container_width=True)
+
+        if div_time is not None:
+            st.info(
+                f"**Chaos boundary detected at t = {div_time:.3f}.** "
+                "The three-body problem is chaotic — small PINN errors "
+                "grow exponentially, causing the learned trajectory to "
+                "diverge from the classical solution. This divergence "
+                "point is itself a meaningful result: it reveals the "
+                "practical time horizon over which the PINN approximation "
+                "remains faithful to the true dynamics.")
+
+        with st.expander("Training Loss Curve"):
+            fig_loss = go.Figure()
+            fig_loss.add_trace(go.Scatter(
+                y=losses, mode='lines',
+                line=dict(color=C_ACCENT, width=1.5)))
+            fig_loss.update_layout(
+                xaxis_title="Epoch", yaxis_title="Loss",
+                yaxis_type="log", template="plotly_white", height=350)
+            st.plotly_chart(fig_loss, use_container_width=True)
 
     else:
         st.info("Adjust parameters in the sidebar, then click **Train & Compare**.")
