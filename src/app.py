@@ -22,13 +22,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yaml
 
-from src.models import PINNPendulum, PINNOrbital
+from src.models import PINNPendulum, PINNOrbital, HamiltonianNN
+from src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian
 from src.physics.equations import pendulum_residual, orbital_residual
 from src.physics.constants import GRAVITY, PENDULUM_LENGTH, GM_DEFAULT
 from src.utils.validation import solve_pendulum_ode, solve_orbit_ode, setup_orbital_ics
 from src.utils.metrics import (
     compute_energy_pendulum, compute_energy_orbital,
-    compute_angular_momentum,
+    compute_angular_momentum, compute_hamiltonian_pendulum,
 )
 from src.training.losses import pendulum_ic_loss, orbital_ic_loss
 
@@ -70,28 +71,6 @@ C_ACCENT = "#AB63FA"
 # ===========================================================================
 # Models not yet in the package (kept self-contained for now)
 # ===========================================================================
-
-class HamiltonianNet(nn.Module):
-    """Learns scalar Hamiltonian H(q, p); EoMs derived via autograd."""
-    def __init__(self, hidden_size=64, num_hidden_layers=3):
-        super().__init__()
-        layers = [nn.Linear(2, hidden_size), nn.Tanh()]
-        for _ in range(num_hidden_layers - 1):
-            layers += [nn.Linear(hidden_size, hidden_size), nn.Tanh()]
-        layers.append(nn.Linear(hidden_size, 1))
-        self.network = nn.Sequential(*layers)
-
-    def forward(self, q, p):
-        return self.network(torch.cat([q, p], dim=1))
-
-    def time_derivatives(self, q, p):
-        H = self.forward(q, p)
-        dH_dq = torch.autograd.grad(
-            H, q, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-        dH_dp = torch.autograd.grad(
-            H, p, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-        return dH_dp, -dH_dq
-
 
 class PINNPDE(nn.Module):
     """Maps (x, t) -> u for PDE solving."""
@@ -228,6 +207,50 @@ def train_pendulum(theta_0, omega_0, t_max, g, L,
     return model, losses
 
 
+def train_hnn_pendulum(theta_0, omega_0, t_max, g, L, m=1.0,
+                       epochs=5000, lr=1e-3, batch_size=256):
+    """Train an HNN on pendulum data and return model + loss history."""
+    progress = st.progress(0, text="Generating HNN training data...")
+    q_data, p_data, dqdt_data, dpdt_data, _ = generate_pendulum_data(
+        theta_0, omega_0, t_max, g, L, m, n_points=1000,
+    )
+    progress.progress(0.05, text="Training HNN...")
+
+    model = HamiltonianNN()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=500, factor=0.5, min_lr=1e-6,
+    )
+
+    q_t = torch.tensor(q_data, dtype=torch.float32).unsqueeze(1)
+    p_t = torch.tensor(p_data, dtype=torch.float32).unsqueeze(1)
+    dqdt_t = torch.tensor(dqdt_data, dtype=torch.float32).unsqueeze(1)
+    dpdt_t = torch.tensor(dpdt_data, dtype=torch.float32).unsqueeze(1)
+    n_samples = len(q_data)
+    losses = []
+
+    for ep in range(epochs):
+        optimizer.zero_grad()
+        idx = torch.randint(0, n_samples, (batch_size,))
+        q_batch = q_t[idx].requires_grad_(True)
+        p_batch = p_t[idx].requires_grad_(True)
+        dqdt_pred, dpdt_pred = model.time_derivative(None, q_batch, p_batch)
+        loss = (torch.mean((dqdt_pred - dqdt_t[idx]) ** 2) +
+                torch.mean((dpdt_pred - dpdt_t[idx]) ** 2))
+        loss.backward()
+        optimizer.step()
+        scheduler.step(loss.item())
+        losses.append(loss.item())
+
+        if (ep + 1) % 100 == 0:
+            progress.progress(
+                (ep + 1) / epochs,
+                text=f"HNN Epoch {ep+1}/{epochs}  |  Loss: {loss.item():.8f}")
+
+    progress.empty()
+    return model, losses
+
+
 def train_orbital(x0, y0, vx0, vy0, t_max, GM,
                   n_col=600, epochs=5000, lr=1e-3, ic_w=50.0,
                   adaptive=False):
@@ -311,6 +334,8 @@ mode = st.sidebar.radio(
 # Pendulum mode
 # ===========================================================================
 
+C_HNN = "#00CC96"  # green for HNN traces
+
 if mode == "Pendulum":
     st.title("Simple Pendulum PINN")
     st.markdown("Train a neural network to solve the pendulum ODE using only physics constraints.")
@@ -328,71 +353,186 @@ if mode == "Pendulum":
                                    value=int(PENDULUM_CFG.get("training", {}).get("epochs", 3000)), key="pend_epochs")
 
     adaptive = st.checkbox("Use Adaptive Sampling", value=False, key="pend_adaptive")
+    hnn_mode = st.checkbox(
+        "HNN Mode — also train a Hamiltonian Neural Network for comparison",
+        value=False, key="pend_hnn",
+        help="Trains an HNN alongside the PINN. The HNN conserves energy by construction (Greydanus et al., NeurIPS 2019).",
+    )
 
     g = GRAVITY
+    m_phys = 1.0
     theta_0 = np.radians(theta_deg)
     omega_0 = 0.0
 
     if st.button("Train & Compare", key="pend_train"):
         torch.manual_seed(42)
-        model, loss_history = train_pendulum(
+
+        # ---- Train PINN ----
+        pinn_model, pinn_loss_history = train_pendulum(
             theta_0, omega_0, t_max, g, L,
             epochs=epochs, adaptive=adaptive)
 
+        # ---- Optionally train HNN ----
+        hnn_model = None
+        hnn_loss_history = None
+        if hnn_mode:
+            torch.manual_seed(42)
+            hnn_model, hnn_loss_history = train_hnn_pendulum(
+                theta_0, omega_0, t_max, g, L, m_phys, epochs=epochs)
+
+        # ---- Ground truth ----
         t_eval = np.linspace(0, t_max, 1000)
         t_ode, theta_ode, omega_ode = solve_pendulum_ode(
             theta_0, omega_0, (0, t_max), t_eval, g=g, L=L)
 
-        model.eval()
+        # ---- PINN evaluation ----
+        pinn_model.eval()
         with torch.no_grad():
             t_tensor = torch.tensor(t_eval, dtype=torch.float32).unsqueeze(1)
-            output = model(t_tensor).numpy()
+            output = pinn_model(t_tensor).numpy()
         theta_pinn = output[:, 0]
         omega_pinn = output[:, 1]
 
-        # Metrics
+        # ---- HNN evaluation ----
+        q_hnn = p_hnn = omega_hnn = None
+        if hnn_model is not None:
+            q0 = theta_0
+            p0 = m_phys * L ** 2 * omega_0
+            q_hnn, p_hnn = integrate_hnn(hnn_model, q0, p0, t_eval)
+            omega_hnn = p_hnn / (m_phys * L ** 2)
+
+        # ---- Metrics ----
         max_err = np.max(np.abs(np.degrees(theta_pinn - theta_ode)))
-        E_pinn = compute_energy_pendulum(theta_pinn, omega_pinn, g, L)
-        E_drift = np.max(np.abs((E_pinn - E_pinn[0]) / (np.abs(E_pinn[0]) + 1e-16)))
+        E_pinn = compute_energy_pendulum(theta_pinn, omega_pinn, g, L, m_phys)
+        E_drift_pinn = np.max(np.abs((E_pinn - E_pinn[0]) / (np.abs(E_pinn[0]) + 1e-16)))
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Final Loss", f"{loss_history[-1]:.6f}")
-        m2.metric("Max Angle Error", f"{max_err:.2f}°")
-        m3.metric("Energy Drift", f"{E_drift:.4f}")
+        if hnn_mode and q_hnn is not None:
+            E_hnn = compute_hamiltonian_pendulum(q_hnn, p_hnn, g, L, m_phys)
+            E_drift_hnn = np.max(np.abs((E_hnn - E_hnn[0]) / (np.abs(E_hnn[0]) + 1e-16)))
+            max_err_hnn = np.max(np.abs(np.degrees(q_hnn - theta_ode)))
 
-        # Plots
-        fig = make_subplots(rows=2, cols=2,
-                            subplot_titles=["θ(t)", "ω(t)", "Phase Portrait", "Error"])
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("PINN Final Loss", f"{pinn_loss_history[-1]:.6f}")
+            m2.metric("PINN Energy Drift", f"{E_drift_pinn:.4f}")
+            m3.metric("HNN Energy Drift", f"{E_drift_hnn:.6f}")
+            m4.metric("HNN Advantage",
+                       f"{E_drift_pinn / (E_drift_hnn + 1e-16):.0f}x")
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Final Loss", f"{pinn_loss_history[-1]:.6f}")
+            m2.metric("Max Angle Error", f"{max_err:.2f}")
+            m3.metric("Energy Drift", f"{E_drift_pinn:.4f}")
 
-        fig.add_trace(go.Scatter(x=t_ode, y=np.degrees(theta_ode), mode='lines',
-                                  name='Classical', line=dict(color=C_CLASSICAL)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=t_eval, y=np.degrees(theta_pinn), mode='lines',
-                                  name='PINN', line=dict(color=C_PINN, dash='dash')), row=1, col=1)
+        # ---- Plots ----
+        if hnn_mode and q_hnn is not None:
+            # 2x3 comparison layout
+            fig = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=[
+                    "Angular Displacement", "Phase Portrait",
+                    "Energy Conservation",
+                    "Relative Energy Error", "Training Convergence",
+                    "Learned H(q,p) Landscape",
+                ],
+            )
 
-        fig.add_trace(go.Scatter(x=t_ode, y=omega_ode, mode='lines',
-                                  name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=1, col=2)
-        fig.add_trace(go.Scatter(x=t_eval, y=omega_pinn, mode='lines',
-                                  name='PINN', line=dict(color=C_PINN, dash='dash'), showlegend=False), row=1, col=2)
+            # (1,1) Trajectory
+            fig.add_trace(go.Scatter(x=t_ode, y=np.degrees(theta_ode), mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=t_eval, y=np.degrees(theta_pinn), mode='lines',
+                                      name='PINN', line=dict(color=C_PINN, dash='dash')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=t_eval, y=np.degrees(q_hnn), mode='lines',
+                                      name='HNN', line=dict(color=C_HNN, dash='dot')), row=1, col=1)
 
-        fig.add_trace(go.Scatter(x=np.degrees(theta_ode), y=omega_ode, mode='lines',
-                                  name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=2, col=1)
-        fig.add_trace(go.Scatter(x=np.degrees(theta_pinn), y=omega_pinn, mode='lines',
-                                  name='PINN', line=dict(color=C_PINN, dash='dash'), showlegend=False), row=2, col=1)
+            # (1,2) Phase portrait
+            fig.add_trace(go.Scatter(x=np.degrees(theta_ode), y=omega_ode, mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=1, col=2)
+            fig.add_trace(go.Scatter(x=np.degrees(theta_pinn), y=omega_pinn, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN, dash='dash'), showlegend=False), row=1, col=2)
+            fig.add_trace(go.Scatter(x=np.degrees(q_hnn), y=omega_hnn, mode='lines',
+                                      name='HNN', line=dict(color=C_HNN, dash='dot'), showlegend=False), row=1, col=2)
 
-        theta_err = np.abs(np.degrees(theta_pinn - theta_ode))
-        omega_err = np.abs(omega_pinn - omega_ode)
-        fig.add_trace(go.Scatter(x=t_eval, y=theta_err, mode='lines',
-                                  name='|Δθ|', line=dict(color=C_ERROR)), row=2, col=2)
-        fig.add_trace(go.Scatter(x=t_eval, y=omega_err, mode='lines',
-                                  name='|Δω|', line=dict(color=C_ACCENT)), row=2, col=2)
+            # (1,3) Energy conservation
+            E_true = compute_energy_pendulum(theta_ode, omega_ode, g, L, m_phys)
+            fig.add_trace(go.Scatter(x=t_eval, y=E_true, mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=1, col=3)
+            fig.add_trace(go.Scatter(x=t_eval, y=E_pinn, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN), showlegend=False), row=1, col=3)
+            fig.add_trace(go.Scatter(x=t_eval, y=E_hnn, mode='lines',
+                                      name='HNN', line=dict(color=C_HNN), showlegend=False), row=1, col=3)
 
-        fig.update_layout(height=700, template="plotly_white")
-        st.plotly_chart(fig, use_container_width=True)
+            # (2,1) Relative energy error
+            E0 = E_true[0]
+            dE_pinn = np.abs((E_pinn - E0) / (np.abs(E0) + 1e-16))
+            dE_hnn_arr = np.abs((E_hnn - E0) / (np.abs(E0) + 1e-16))
+            fig.add_trace(go.Scatter(x=t_eval, y=dE_pinn, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN), showlegend=False), row=2, col=1)
+            fig.add_trace(go.Scatter(x=t_eval, y=dE_hnn_arr, mode='lines',
+                                      name='HNN', line=dict(color=C_HNN), showlegend=False), row=2, col=1)
+            fig.update_yaxes(type="log", row=2, col=1)
+
+            # (2,2) Training convergence
+            fig.add_trace(go.Scatter(y=pinn_loss_history, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN), showlegend=False), row=2, col=2)
+            fig.add_trace(go.Scatter(y=hnn_loss_history, mode='lines',
+                                      name='HNN', line=dict(color=C_HNN), showlegend=False), row=2, col=2)
+            fig.update_yaxes(type="log", row=2, col=2)
+
+            # (2,3) Learned Hamiltonian landscape
+            q_grid = np.linspace(-np.pi, np.pi, 80)
+            p_grid = np.linspace(-3, 3, 80)
+            Q, P = np.meshgrid(q_grid, p_grid)
+            Q_flat = torch.tensor(Q.flatten(), dtype=torch.float32).unsqueeze(1)
+            P_flat = torch.tensor(P.flatten(), dtype=torch.float32).unsqueeze(1)
+            hnn_model.eval()
+            with torch.no_grad():
+                H_pred = hnn_model(Q_flat, P_flat).numpy().reshape(Q.shape)
+            fig.add_trace(go.Contour(
+                x=np.degrees(q_grid), y=p_grid, z=H_pred,
+                colorscale='Greens', showscale=False,
+                contours=dict(showlabels=True),
+                name='Learned H',
+            ), row=2, col=3)
+
+            fig.update_layout(height=800, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            # Standard 2x2 PINN-only layout
+            fig = make_subplots(rows=2, cols=2,
+                                subplot_titles=["θ(t)", "ω(t)", "Phase Portrait", "Error"])
+
+            fig.add_trace(go.Scatter(x=t_ode, y=np.degrees(theta_ode), mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=t_eval, y=np.degrees(theta_pinn), mode='lines',
+                                      name='PINN', line=dict(color=C_PINN, dash='dash')), row=1, col=1)
+
+            fig.add_trace(go.Scatter(x=t_ode, y=omega_ode, mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=1, col=2)
+            fig.add_trace(go.Scatter(x=t_eval, y=omega_pinn, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN, dash='dash'), showlegend=False), row=1, col=2)
+
+            fig.add_trace(go.Scatter(x=np.degrees(theta_ode), y=omega_ode, mode='lines',
+                                      name='Classical', line=dict(color=C_CLASSICAL), showlegend=False), row=2, col=1)
+            fig.add_trace(go.Scatter(x=np.degrees(theta_pinn), y=omega_pinn, mode='lines',
+                                      name='PINN', line=dict(color=C_PINN, dash='dash'), showlegend=False), row=2, col=1)
+
+            theta_err = np.abs(np.degrees(theta_pinn - theta_ode))
+            omega_err = np.abs(omega_pinn - omega_ode)
+            fig.add_trace(go.Scatter(x=t_eval, y=theta_err, mode='lines',
+                                      name='|Δθ|', line=dict(color=C_ERROR)), row=2, col=2)
+            fig.add_trace(go.Scatter(x=t_eval, y=omega_err, mode='lines',
+                                      name='|Δω|', line=dict(color=C_ACCENT)), row=2, col=2)
+
+            fig.update_layout(height=700, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Training Loss"):
             fig_loss = go.Figure()
-            fig_loss.add_trace(go.Scatter(y=loss_history, mode='lines',
-                                           line=dict(color='navy')))
+            fig_loss.add_trace(go.Scatter(y=pinn_loss_history, mode='lines',
+                                           name='PINN', line=dict(color='navy')))
+            if hnn_loss_history is not None:
+                fig_loss.add_trace(go.Scatter(y=hnn_loss_history, mode='lines',
+                                               name='HNN', line=dict(color=C_HNN)))
             fig_loss.update_layout(yaxis_type="log", height=350,
                                     xaxis_title="Epoch", yaxis_title="Loss",
                                     template="plotly_white")

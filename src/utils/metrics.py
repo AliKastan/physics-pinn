@@ -59,3 +59,18 @@ def relative_energy_drift(E):
 def l2_error(predicted, reference):
     """Compute L2 error between predicted and reference trajectories."""
     return np.sqrt(np.mean((predicted - reference) ** 2))
+
+
+def compute_hamiltonian_pendulum(q, p, g=9.81, L=1.0, m=1.0):
+    """
+    True pendulum Hamiltonian: H = p^2/(2mL^2) - mgL*cos(q).
+
+    Args:
+        q: angle array (theta)
+        p: angular momentum array (m*L^2*omega)
+        g, L, m: physical parameters
+
+    Returns:
+        H: Hamiltonian (total energy) array
+    """
+    return p ** 2 / (2 * m * L ** 2) - m * g * L * np.cos(q)

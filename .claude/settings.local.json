@@ -23,7 +23,12 @@
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_pendulum.py::test_forward_pass_shape tests/test_pendulum.py::test_residual_nonzero_before_training tests/test_pendulum.py::test_training_reduces_loss tests/test_orbital.py::test_forward_pass_shape tests/test_orbital.py::test_residual_nonzero_before_training tests/test_orbital.py::test_training_reduces_loss -v 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py::test_forward_pass_shape tests/test_pendulum.py::test_residual_nonzero_before_training tests/test_pendulum.py::test_training_reduces_loss tests/test_orbital.py::test_forward_pass_shape tests/test_orbital.py::test_residual_nonzero_before_training tests/test_orbital.py::test_training_reduces_loss -v 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ -v 2>&1)",
-      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py tests/test_orbital.py -v 2>&1)"
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py tests/test_orbital.py -v 2>&1)",
+      "Bash(ls /c/Users/kasta/Projects/physics-pinn/tests/test_*.py)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_hnn.py -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py tests/test_orbital.py tests/test_hnn.py -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nfrom src.models import PINNPendulum, PINNOrbital, HamiltonianNN\nfrom src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian\nfrom src.training.losses import hamiltonian_loss, energy_conservation_loss\nfrom src.utils.metrics import compute_hamiltonian_pendulum\nprint\\('All imports OK'\\)\nprint\\(f'HamiltonianNN: input \\(q,p\\) -> H scalar'\\)\nimport torch\nhnn = HamiltonianNN\\(\\)\nq = torch.randn\\(10, 1, requires_grad=True\\)\np = torch.randn\\(10, 1, requires_grad=True\\)\nH = hnn\\(q, p\\)\ndqdt, dpdt = hnn.time_derivative\\(None, q, p\\)\nprint\\(f'H shape: {H.shape}, dqdt shape: {dqdt.shape}, dpdt shape: {dpdt.shape}'\\)\n\" 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\n\" 2>&1)"
     ]
   }
 }
