@@ -1,0 +1,34 @@
+# Default configuration for pendulum PINN training
+
+# Physics parameters
+physics:
+  g: 9.81          # gravitational acceleration (m/s^2)
+  L: 1.0           # pendulum length (m)
+
+# Initial conditions
+initial_conditions:
+  theta_0_deg: 45  # initial angle in degrees
+  omega_0: 0.0     # initial angular velocity (rad/s)
+
+# Training hyperparameters
+training:
+  epochs: 5000
+  lr: 1.0e-3
+  n_collocation: 500
+  ic_weight: 20.0
+  t_max: 10.0
+  scheduler: plateau
+  patience: 500
+  factor: 0.5
+  min_lr: 1.0e-6
+
+# Adaptive collocation
+adaptive:
+  enabled: false
+  interval: 500
+  uniform_fraction: 0.2
+
+# Network architecture
+network:
+  hidden_size: 64
+  num_hidden_layers: 3

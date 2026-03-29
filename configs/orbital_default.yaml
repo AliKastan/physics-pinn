@@ -1,0 +1,29 @@
+# Default configuration for orbital PINN training
+
+# Physics parameters
+physics:
+  GM: 1.0              # gravitational parameter (normalized)
+  eccentricity: 0.3    # orbital eccentricity
+  n_orbits: 1.0        # number of orbital periods to simulate
+
+# Training hyperparameters
+training:
+  epochs: 8000
+  lr: 1.0e-3
+  n_collocation: 800
+  ic_weight: 50.0
+  scheduler: plateau
+  patience: 500
+  factor: 0.5
+  min_lr: 1.0e-6
+
+# Adaptive collocation
+adaptive:
+  enabled: false
+  interval: 500
+  uniform_fraction: 0.2
+
+# Network architecture
+network:
+  hidden_size: 128
+  num_hidden_layers: 4

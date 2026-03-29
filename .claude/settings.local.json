@@ -8,7 +8,22 @@
       "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_pde.py''\\).read\\(\\)\\); print\\(''pinn_pde.py: OK''\\)\")",
       "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_threebody.py''\\).read\\(\\)\\); print\\(''pinn_threebody.py: OK''\\)\")",
       "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_pendulum.py''\\).read\\(\\)\\); print\\(''pinn_pendulum.py: OK''\\)\")",
-      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_orbital.py''\\).read\\(\\)\\); print\\(''pinn_orbital.py: OK''\\)\")"
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''pinn_orbital.py''\\).read\\(\\)\\); print\\(''pinn_orbital.py: OK''\\)\")",
+      "Bash(python -m pytest tests/test_equations.py -v)",
+      "Bash(where python3:*)",
+      "Bash(where python:*)",
+      "Bash(python3:*)",
+      "Read(//c/Users/kasta/AppData/Local/Programs/Python/**)",
+      "Read(//c/ProgramData/anaconda3/**)",
+      "Read(//c/Users/kasta/anaconda3/**)",
+      "Read(//c/Users/kasta/miniconda3/**)",
+      "Bash(conda info:*)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"import torch; print\\('torch ok'\\)\" 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_pendulum.py::test_forward_pass_shape tests/test_pendulum.py::test_residual_nonzero_before_training tests/test_pendulum.py::test_training_reduces_loss tests/test_orbital.py::test_forward_pass_shape tests/test_orbital.py::test_residual_nonzero_before_training tests/test_orbital.py::test_training_reduces_loss -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py::test_forward_pass_shape tests/test_pendulum.py::test_residual_nonzero_before_training tests/test_pendulum.py::test_training_reduces_loss tests/test_orbital.py::test_forward_pass_shape tests/test_orbital.py::test_residual_nonzero_before_training tests/test_orbital.py::test_training_reduces_loss -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ -v 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py tests/test_orbital.py -v 2>&1)"
     ]
   }
 }
