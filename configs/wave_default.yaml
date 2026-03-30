@@ -1,0 +1,30 @@
+# Default configuration for 1D wave equation PINN
+
+# Physics parameters
+physics:
+  c: 1.0              # wave speed
+  L_string: 1.0       # string length
+
+# Initial condition
+initial_condition:
+  type: sine           # one of: sine, plucked, gaussian
+
+# Training hyperparameters
+training:
+  epochs: 8000
+  lr: 1.0e-3
+  n_interior: 2000
+  n_bc: 200
+  n_ic: 200
+  t_max: 1.0
+  bc_weight: 10.0
+  ic_weight: 10.0
+  scheduler: plateau
+  patience: 500
+  factor: 0.5
+  min_lr: 1.0e-6
+
+# Network architecture
+network:
+  hidden_size: 64
+  num_hidden_layers: 4

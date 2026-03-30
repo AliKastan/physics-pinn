@@ -100,3 +100,21 @@ def neumann_bc_residual(du_dn_boundary, target_flux):
         residual tensor (N, 1)
     """
     return du_dn_boundary - target_flux
+
+
+def wave_equation_residual(d2u_dt2, d2u_dx2, c=1.0):
+    """
+    1D wave equation residual:  d²u/dt² - c² * d²u/dx² = 0.
+
+    Unlike the heat equation (first-order in t), the wave equation is
+    second-order in both space and time.
+
+    Args:
+        d2u_dt2: second temporal derivative from autograd (N, 1)
+        d2u_dx2: second spatial derivative from autograd (N, 1)
+        c: wave speed
+
+    Returns:
+        residual tensor (N, 1)
+    """
+    return d2u_dt2 - c ** 2 * d2u_dx2

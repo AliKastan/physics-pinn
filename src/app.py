@@ -22,12 +22,16 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yaml
 
-from src.models import PINNPendulum, PINNOrbital, HamiltonianNN, HeatPINN
+from src.models import PINNPendulum, PINNOrbital, HamiltonianNN, HeatPINN, WavePINN
 from src.models import InversePendulumPINN, InverseOrbitalPINN
 from src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian
 from src.models.inverse_pinn import train_inverse_pendulum, train_inverse_orbital
 from src.models.heat_pinn import (
     train_heat_pinn, heat_analytical, IC_FUNCTIONS,
+)
+from src.models.wave_pinn import (
+    train_wave_pinn, wave_analytical, WAVE_IC_FUNCTIONS,
+    wave_mode_decomposition, wave_energy, WavePINN as WavePINNClass,
 )
 from src.physics.equations import pendulum_residual, orbital_residual
 from src.physics.constants import GRAVITY, PENDULUM_LENGTH, GM_DEFAULT
@@ -332,7 +336,7 @@ def train_orbital(x0, y0, vx0, vy0, t_max, GM,
 st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
-    ["Pendulum", "Orbital Mechanics", "Inverse Problem", "Heat Equation"],
+    ["Pendulum", "Orbital Mechanics", "Inverse Problem", "Heat Equation", "Wave Equation"],
     index=0,
 )
 
@@ -1162,3 +1166,225 @@ elif mode == "Heat Equation":
                 xaxis_title="Epoch", yaxis_title="Loss",
                 template="plotly_white")
             st.plotly_chart(fig_loss_h, use_container_width=True)
+
+
+# ===========================================================================
+# Wave Equation mode
+# ===========================================================================
+
+elif mode == "Wave Equation":
+    st.title("1D Wave Equation PINN")
+    st.markdown(
+        r"Solve $\frac{\partial^2 u}{\partial t^2} = c^2 \frac{\partial^2 u}{\partial x^2}$ "
+        "on a vibrating string with fixed ends."
+    )
+
+    WAVE_CFG = load_config("wave_default.yaml")
+    wave_phys = WAVE_CFG.get("physics", {})
+    wave_train = WAVE_CFG.get("training", {})
+
+    col1, col2 = st.columns(2)
+    with col1:
+        c_val = st.slider("Wave speed c", 0.5, 3.0,
+                           float(wave_phys.get("c", 1.0)), key="wave_c")
+        L_string = st.slider("String length L", 0.5, 2.0,
+                              float(wave_phys.get("L_string", 1.0)), key="wave_L")
+        ic_type_w = st.selectbox(
+            "Initial shape",
+            ["sine", "plucked", "gaussian"], key="wave_ic")
+    with col2:
+        t_max_w = st.slider("Time span", 0.5, 2.0,
+                              float(wave_train.get("t_max", 1.0)), key="wave_tmax")
+        epochs_w = st.select_slider(
+            "Training epochs",
+            options=[3000, 5000, 8000, 10000],
+            value=int(wave_train.get("epochs", 8000)), key="wave_epochs")
+
+    if st.button("Train & Solve", key="wave_train"):
+        torch.manual_seed(42)
+
+        # ---- Train ----
+        progress_w = st.progress(0, text="Training Wave Equation PINN...")
+        from src.models.wave_pinn import zero_velocity
+
+        model_w = WavePINNClass()
+        opt_w = torch.optim.Adam(model_w.parameters(), lr=1e-3)
+        sched_w = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt_w, patience=500, factor=0.5, min_lr=1e-6)
+        ic_fn_w = lambda x: WAVE_IC_FUNCTIONS[ic_type_w](x, L_string=L_string)
+        loss_hist_w = []
+
+        for ep in range(epochs_w):
+            opt_w.zero_grad()
+            x_int = torch.rand(2000, 1) * L_string
+            t_int = torch.rand(2000, 1) * t_max_w
+            l_pde = model_w.physics_loss(x_int, t_int, c=c_val)
+            l_bc = model_w.boundary_loss(200, t_max_w, L_string)
+            l_ic_u = model_w.ic_displacement_loss(200, ic_fn_w, L_string)
+            l_ic_v = model_w.ic_velocity_loss(200, zero_velocity, L_string)
+            total = l_pde + 10.0 * l_bc + 10.0 * (l_ic_u + l_ic_v)
+            total.backward()
+            opt_w.step()
+            sched_w.step(total.item())
+            loss_hist_w.append(total.item())
+            if (ep + 1) % 200 == 0:
+                progress_w.progress(
+                    (ep + 1) / epochs_w,
+                    text=f"Epoch {ep+1}/{epochs_w} | Loss: {total.item():.6f}")
+
+        progress_w.empty()
+
+        # ---- Evaluate ----
+        nx, nt = 100, 100
+        x_arr = np.linspace(0, L_string, nx)
+        t_arr = np.linspace(0, t_max_w, nt)
+        X, T_grid = np.meshgrid(x_arr, t_arr)
+
+        model_w.eval()
+        with torch.no_grad():
+            x_flat = torch.tensor(X.flatten(), dtype=torch.float32).unsqueeze(1)
+            t_flat = torch.tensor(T_grid.flatten(), dtype=torch.float32).unsqueeze(1)
+            u_pinn_w = model_w(x_flat, t_flat).numpy().reshape(X.shape)
+
+        has_analytical_w = (ic_type_w in ('sine', 'plucked', 'gaussian'))
+        if has_analytical_w:
+            u_exact_w = wave_analytical(X, T_grid, c=c_val,
+                                         L_string=L_string, ic_type=ic_type_w)
+            u_error_w = np.abs(u_pinn_w - u_exact_w)
+        else:
+            u_exact_w = None
+            u_error_w = None
+
+        # ---- Metrics ----
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Final Loss", f"{loss_hist_w[-1]:.6f}")
+        if u_error_w is not None:
+            m2.metric("Max |Error|", f"{np.max(u_error_w):.2e}")
+            m3.metric("Mean |Error|", f"{np.mean(u_error_w):.2e}")
+
+        # ---- Wave animation (heatmap) ----
+        st.subheader("Displacement Field u(x, t)")
+        vmax_w = np.max(np.abs(u_pinn_w))
+        fig_wave = go.Figure(data=go.Heatmap(
+            x=x_arr, y=t_arr, z=u_pinn_w,
+            colorscale='RdBu_r', zmid=0,
+            zmin=-vmax_w, zmax=vmax_w,
+            colorbar=dict(title='u'),
+        ))
+        fig_wave.update_layout(
+            xaxis_title='x', yaxis_title='t',
+            height=450, template="plotly_white",
+        )
+        st.plotly_chart(fig_wave, use_container_width=True)
+
+        # ---- Comparison at snapshots ----
+        if has_analytical_w:
+            st.subheader("PINN vs Analytical at Time Snapshots")
+            t_snaps_w = [0.0, t_max_w * 0.25, t_max_w * 0.5, t_max_w]
+            fig_snap_w = make_subplots(
+                rows=1, cols=len(t_snaps_w),
+                subplot_titles=[f"t = {ts:.2f}" for ts in t_snaps_w],
+            )
+            for i, ts in enumerate(t_snaps_w):
+                t_idx = int(ts / t_max_w * (nt - 1))
+                t_idx = min(t_idx, nt - 1)
+                fig_snap_w.add_trace(go.Scatter(
+                    x=x_arr, y=u_exact_w[t_idx, :],
+                    mode='lines', name='Analytical' if i == 0 else None,
+                    line=dict(color=C_CLASSICAL), showlegend=(i == 0),
+                ), row=1, col=i + 1)
+                fig_snap_w.add_trace(go.Scatter(
+                    x=x_arr, y=u_pinn_w[t_idx, :],
+                    mode='lines', name='PINN' if i == 0 else None,
+                    line=dict(color=C_PINN, dash='dash'), showlegend=(i == 0),
+                ), row=1, col=i + 1)
+            fig_snap_w.update_layout(height=350, template="plotly_white")
+            st.plotly_chart(fig_snap_w, use_container_width=True)
+
+        # ---- Mode decomposition ----
+        st.subheader("Fourier Mode Decomposition")
+        t_mode = t_max_w * 0.1
+        modes = wave_mode_decomposition(
+            x_arr, np.full_like(x_arr, t_mode),
+            c=c_val, L_string=L_string, ic_type=ic_type_w, n_modes=5,
+        )
+        fig_modes = go.Figure()
+        mode_colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A']
+        u_superposition = np.zeros_like(x_arr)
+        for (n, b_n, u_mode), color in zip(modes, mode_colors):
+            u_superposition += u_mode
+            fig_modes.add_trace(go.Scatter(
+                x=x_arr, y=u_mode, mode='lines',
+                name=f'Mode {n} (b={b_n:.3f})',
+                line=dict(color=color, dash='dot', width=1),
+            ))
+        fig_modes.add_trace(go.Scatter(
+            x=x_arr, y=u_superposition, mode='lines',
+            name='Superposition', line=dict(color='black', width=2),
+        ))
+        fig_modes.update_layout(
+            title=f'First 5 modes at t = {t_mode:.2f}',
+            xaxis_title='x', yaxis_title='u',
+            height=400, template="plotly_white",
+        )
+        st.plotly_chart(fig_modes, use_container_width=True)
+
+        # ---- Energy conservation ----
+        st.subheader("Energy Conservation")
+        energies = []
+        for ti in range(nt):
+            t_val = t_arr[ti]
+            x_e = torch.tensor(x_arr, dtype=torch.float32).unsqueeze(1)
+            t_e = torch.full((nx, 1), t_val)
+            t_e.requires_grad_(True)
+            x_e_g = x_e.clone().requires_grad_(True)
+            u_e = model_w(x_e_g, t_e)
+            du_dt_e = torch.autograd.grad(
+                u_e, t_e, torch.ones_like(u_e),
+                create_graph=False, retain_graph=True)[0]
+            du_dx_e = torch.autograd.grad(
+                u_e, x_e_g, torch.ones_like(u_e), create_graph=False)[0]
+            du_dt_np = du_dt_e.detach().numpy().squeeze()
+            du_dx_np = du_dx_e.detach().numpy().squeeze()
+            E = wave_energy(x_arr, None, du_dt_np, du_dx_np, c=c_val)
+            energies.append(E)
+
+        fig_energy = go.Figure()
+        fig_energy.add_trace(go.Scatter(
+            x=t_arr, y=energies, mode='lines',
+            line=dict(color=C_CLASSICAL),
+        ))
+        E0 = energies[0]
+        fig_energy.add_hline(y=E0, line_dash="dash", line_color="gray",
+                              annotation_text=f"E(0) = {E0:.4f}")
+        max_drift = max(abs(e - E0) for e in energies) / (abs(E0) + 1e-16)
+        fig_energy.update_layout(
+            title=f'Total Energy (max drift: {max_drift:.2%})',
+            xaxis_title='t', yaxis_title='Energy',
+            height=350, template="plotly_white",
+        )
+        st.plotly_chart(fig_energy, use_container_width=True)
+
+        # ---- Error heatmap ----
+        if u_error_w is not None:
+            with st.expander("Error Heatmap"):
+                fig_err_w = go.Figure(data=go.Heatmap(
+                    x=x_arr, y=t_arr, z=u_error_w,
+                    colorscale='Viridis', colorbar=dict(title='|error|'),
+                ))
+                fig_err_w.update_layout(
+                    xaxis_title='x', yaxis_title='t',
+                    height=400, template="plotly_white",
+                )
+                st.plotly_chart(fig_err_w, use_container_width=True)
+
+        # ---- Training loss ----
+        with st.expander("Training Loss"):
+            fig_loss_w = go.Figure()
+            fig_loss_w.add_trace(go.Scatter(
+                y=loss_hist_w, mode='lines', line=dict(color='navy')))
+            fig_loss_w.update_layout(
+                yaxis_type="log", height=350,
+                xaxis_title="Epoch", yaxis_title="Loss",
+                template="plotly_white")
+            st.plotly_chart(fig_loss_w, use_container_width=True)

@@ -258,7 +258,7 @@ def heat_analytical(x, t, alpha=0.01, L_rod=1.0, ic_type='sine', n_terms=50):
     u = np.zeros_like(x)
     for n in range(1, n_terms + 1):
         basis = np.sin(n * np.pi * x_quad / L_rod)
-        b_n = (2 / L_rod) * np.trapz(f_x * basis, dx=dx)
+        b_n = (2 / L_rod) * np.trapezoid(f_x * basis, dx=dx)
         decay = np.exp(-alpha * (n * np.pi / L_rod) ** 2 * t)
         u = u + b_n * decay * np.sin(n * np.pi * x / L_rod)
 
