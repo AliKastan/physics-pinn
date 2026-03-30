@@ -23,10 +23,13 @@ from plotly.subplots import make_subplots
 import yaml
 
 from src.models import PINNPendulum, PINNOrbital, HamiltonianNN
+from src.models import InversePendulumPINN, InverseOrbitalPINN
 from src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian
+from src.models.inverse_pinn import train_inverse_pendulum, train_inverse_orbital
 from src.physics.equations import pendulum_residual, orbital_residual
 from src.physics.constants import GRAVITY, PENDULUM_LENGTH, GM_DEFAULT
 from src.utils.validation import solve_pendulum_ode, solve_orbit_ode, setup_orbital_ics
+from src.utils.data_generation import generate_noisy_pendulum_data, generate_noisy_orbital_data
 from src.utils.metrics import (
     compute_energy_pendulum, compute_energy_orbital,
     compute_angular_momentum, compute_hamiltonian_pendulum,
@@ -326,7 +329,7 @@ def train_orbital(x0, y0, vx0, vy0, t_max, GM,
 st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
-    ["Pendulum", "Orbital Mechanics"],
+    ["Pendulum", "Orbital Mechanics", "Inverse Problem"],
     index=0,
 )
 
@@ -635,3 +638,362 @@ elif mode == "Orbital Mechanics":
                                     xaxis_title="Epoch", yaxis_title="Loss",
                                     template="plotly_white")
             st.plotly_chart(fig_loss, use_container_width=True)
+
+
+# ===========================================================================
+# Inverse Problem mode
+# ===========================================================================
+
+elif mode == "Inverse Problem":
+    st.title("Inverse PINN — Parameter Estimation from Noisy Data")
+    st.markdown(
+        "Given noisy observations of a physical system, simultaneously "
+        "reconstruct the trajectory and infer unknown physical parameters."
+    )
+
+    inv_system = st.radio(
+        "System", ["Pendulum (g, L)", "Orbital (GM)"],
+        key="inv_system", horizontal=True,
+    )
+
+    if inv_system == "Pendulum (g, L)":
+        st.subheader("Pendulum: Infer g and L")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**True parameters** (used to generate data)")
+            g_true = st.slider("True g (m/s²)", 5.0, 15.0, 9.81, key="inv_g_true")
+            L_true = st.slider("True L (m)", 0.5, 3.0, 1.0, key="inv_L_true")
+            theta_deg = st.slider("Initial angle (deg)", 10, 80, 45, key="inv_theta")
+            noise_pct = st.slider("Noise level (%)", 1, 20, 5, key="inv_noise")
+        with col2:
+            st.markdown("**Initial guesses** (wrong on purpose)")
+            g_init = st.slider("g guess (m/s²)", 1.0, 20.0, 5.0, key="inv_g_init")
+            L_init = st.slider("L guess (m)", 0.2, 5.0, 2.0, key="inv_L_init")
+            n_obs = st.slider("Observations", 20, 200, 80, key="inv_nobs")
+            epochs = st.select_slider("Training epochs",
+                                       options=[5000, 8000, 10000, 15000],
+                                       value=10000, key="inv_epochs")
+
+        theta_0 = np.radians(theta_deg)
+        omega_0 = 0.0
+        t_max = 10.0
+        noise_std = noise_pct / 100.0 * theta_0  # relative to initial angle
+
+        if st.button("Generate Data & Train", key="inv_pend_train"):
+            torch.manual_seed(42)
+            np.random.seed(42)
+
+            # Generate data
+            progress = st.progress(0, text="Generating noisy observations...")
+            data = generate_noisy_pendulum_data(
+                theta_0, omega_0, t_max, g=g_true, L=L_true,
+                n_obs=n_obs, noise_std=noise_std,
+            )
+            progress.progress(0.05, text="Warming up network...")
+
+            # Train
+            model = InversePendulumPINN(g_init=g_init, L_init=L_init)
+            t_obs_t = torch.tensor(data['t_obs'], dtype=torch.float32).unsqueeze(1)
+            theta_obs_t = torch.tensor(data['theta_obs'], dtype=torch.float32)
+
+            # Warmup phase
+            warmup_opt = torch.optim.Adam(model.network.parameters(), lr=1e-3)
+            for ep in range(1500):
+                warmup_opt.zero_grad()
+                out = model(t_obs_t)
+                loss = 10.0 * torch.mean((out[:, 0] - theta_obs_t) ** 2)
+                t0 = torch.zeros(1, 1)
+                out0 = model(t0)
+                loss = loss + 20.0 * ((out0[0, 0] - theta_0) ** 2 +
+                                      (out0[0, 1] - omega_0) ** 2)
+                loss.backward()
+                warmup_opt.step()
+            progress.progress(0.15, text="Training with physics constraints...")
+
+            # Main training
+            optimizer = torch.optim.Adam([
+                {'params': model.network.parameters(), 'lr': 1e-3},
+                {'params': [model.g_param, model.L_param], 'lr': 1e-2},
+            ])
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=500, factor=0.5, min_lr=1e-6,
+            )
+
+            loss_history = []
+            g_history = []
+            L_history = []
+
+            for epoch in range(epochs):
+                optimizer.zero_grad()
+                t_col = torch.rand(500, 1) * t_max
+                loss_phys = model.physics_loss(t_col)
+                out_obs = model(t_obs_t)
+                loss_data = torch.mean((out_obs[:, 0] - theta_obs_t) ** 2)
+                t0 = torch.zeros(1, 1)
+                out0 = model(t0)
+                loss_ic = (out0[0, 0] - theta_0) ** 2 + (out0[0, 1] - omega_0) ** 2
+                total = loss_phys + 10.0 * loss_data + 20.0 * loss_ic
+                total.backward()
+                optimizer.step()
+                scheduler.step(total.item())
+                model.clamp_parameters()
+                loss_history.append(total.item())
+                g_history.append(model.g)
+                L_history.append(model.L)
+
+                if (epoch + 1) % 200 == 0:
+                    progress.progress(
+                        0.15 + 0.85 * (epoch + 1) / epochs,
+                        text=f"Epoch {epoch+1}/{epochs} | "
+                             f"g={model.g:.3f} L={model.L:.3f} "
+                             f"g/L={model.g_over_L:.3f} | "
+                             f"Loss: {total.item():.6f}")
+
+            progress.empty()
+
+            # ---- Metrics ----
+            g_err = abs(model.g - g_true) / g_true * 100
+            L_err = abs(model.L - L_true) / L_true * 100
+            gL_err = abs(model.g_over_L - g_true / L_true) / (g_true / L_true) * 100
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Inferred g", f"{model.g:.3f}", f"{g_err:.1f}% error")
+            m2.metric("Inferred L", f"{model.L:.3f}", f"{L_err:.1f}% error")
+            m3.metric("g/L ratio", f"{model.g_over_L:.3f}", f"{gL_err:.1f}% error")
+            m4.metric("Final Loss", f"{loss_history[-1]:.6f}")
+
+            # ---- PINN reconstruction ----
+            model.eval()
+            t_plot = np.linspace(0, t_max, 1000)
+            with torch.no_grad():
+                out = model(torch.tensor(t_plot, dtype=torch.float32).unsqueeze(1)).numpy()
+            theta_pinn = out[:, 0]
+
+            # ---- Plots: 2x3 ----
+            fig = make_subplots(
+                rows=2, cols=3,
+                subplot_titles=[
+                    "Trajectory Reconstruction", "g Convergence", "L Convergence",
+                    "g/L Ratio Convergence", "Training Loss", "True vs Inferred",
+                ],
+            )
+
+            # (1,1) Trajectory
+            fig.add_trace(go.Scatter(
+                x=data['t_dense'], y=np.degrees(data['theta_true']),
+                mode='lines', name='Ground truth',
+                line=dict(color=C_CLASSICAL),
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=data['t_obs'], y=np.degrees(data['theta_obs']),
+                mode='markers', name='Noisy obs',
+                marker=dict(color='gray', size=4, opacity=0.5),
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=t_plot, y=np.degrees(theta_pinn),
+                mode='lines', name='PINN reconstruction',
+                line=dict(color=C_PINN, dash='dash'),
+            ), row=1, col=1)
+
+            # (1,2) g convergence
+            fig.add_trace(go.Scatter(
+                y=g_history, mode='lines', name='Inferred g',
+                line=dict(color=C_PINN), showlegend=False,
+            ), row=1, col=2)
+            fig.add_hline(y=g_true, line_dash="dash", line_color=C_CLASSICAL,
+                          row=1, col=2)
+
+            # (1,3) L convergence
+            fig.add_trace(go.Scatter(
+                y=L_history, mode='lines', name='Inferred L',
+                line=dict(color=C_PINN), showlegend=False,
+            ), row=1, col=3)
+            fig.add_hline(y=L_true, line_dash="dash", line_color=C_CLASSICAL,
+                          row=1, col=3)
+
+            # (2,1) g/L ratio
+            g_over_L_hist = [g / l for g, l in zip(g_history, L_history)]
+            fig.add_trace(go.Scatter(
+                y=g_over_L_hist, mode='lines', name='Inferred g/L',
+                line=dict(color=C_PINN), showlegend=False,
+            ), row=2, col=1)
+            fig.add_hline(y=g_true / L_true, line_dash="dash",
+                          line_color=C_CLASSICAL, row=2, col=1)
+
+            # (2,2) Training loss
+            fig.add_trace(go.Scatter(
+                y=loss_history, mode='lines', name='Loss',
+                line=dict(color='navy'), showlegend=False,
+            ), row=2, col=2)
+            fig.update_yaxes(type="log", row=2, col=2)
+
+            # (2,3) Parameter comparison bar chart
+            fig.add_trace(go.Bar(
+                x=['g', 'L', 'g/L'],
+                y=[g_true, L_true, g_true / L_true],
+                name='True', marker_color=C_CLASSICAL,
+            ), row=2, col=3)
+            fig.add_trace(go.Bar(
+                x=['g', 'L', 'g/L'],
+                y=[model.g, model.L, model.g_over_L],
+                name='Inferred', marker_color=C_PINN,
+            ), row=2, col=3)
+
+            fig.update_layout(height=750, template="plotly_white",
+                              barmode='group')
+            st.plotly_chart(fig, use_container_width=True)
+
+    else:  # Orbital (GM)
+        st.subheader("Orbital: Infer GM")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**True parameters**")
+            GM_true = st.slider("True GM", 0.5, 3.0, 1.0, key="inv_GM_true")
+            ecc = st.slider("Eccentricity", 0.0, 0.7, 0.3, key="inv_ecc")
+            noise_pct_o = st.slider("Noise level (%)", 1, 15, 5, key="inv_noise_o")
+        with col2:
+            st.markdown("**Initial guess**")
+            GM_init = st.slider("GM guess", 0.1, 5.0, 0.5, key="inv_GM_init")
+            n_obs_o = st.slider("Observations", 30, 200, 80, key="inv_nobs_o")
+            epochs_o = st.select_slider("Training epochs",
+                                         options=[5000, 8000, 10000, 15000],
+                                         value=10000, key="inv_epochs_o")
+
+        if st.button("Generate Data & Train", key="inv_orb_train"):
+            torch.manual_seed(42)
+            np.random.seed(42)
+
+            progress = st.progress(0, text="Generating noisy orbital observations...")
+            noise_std_o = noise_pct_o / 100.0
+            data = generate_noisy_orbital_data(
+                eccentricity=ecc, GM=GM_true,
+                n_obs=n_obs_o, noise_std=noise_std_o,
+            )
+            progress.progress(0.05, text="Warming up network...")
+
+            model = InverseOrbitalPINN(GM_init=GM_init)
+            ics = data['ics']
+            t_max_o = data['t_max']
+
+            t_obs_t = torch.tensor(data['t_obs'], dtype=torch.float32).unsqueeze(1)
+            x_obs_t = torch.tensor(data['x_obs'], dtype=torch.float32)
+            y_obs_t = torch.tensor(data['y_obs'], dtype=torch.float32)
+
+            x0_t = torch.tensor(ics[0], dtype=torch.float32)
+            y0_t = torch.tensor(ics[1], dtype=torch.float32)
+            vx0_t = torch.tensor(ics[2], dtype=torch.float32)
+            vy0_t = torch.tensor(ics[3], dtype=torch.float32)
+
+            # Warmup
+            warmup_opt = torch.optim.Adam(model.network.parameters(), lr=1e-3)
+            for ep in range(2000):
+                warmup_opt.zero_grad()
+                out = model(t_obs_t)
+                loss = 10.0 * (torch.mean((out[:, 0] - x_obs_t) ** 2) +
+                               torch.mean((out[:, 1] - y_obs_t) ** 2))
+                t0 = torch.zeros(1, 1)
+                out0 = model(t0)
+                loss = loss + 50.0 * ((out0[0, 0] - x0_t) ** 2 +
+                                      (out0[0, 1] - y0_t) ** 2 +
+                                      (out0[0, 2] - vx0_t) ** 2 +
+                                      (out0[0, 3] - vy0_t) ** 2)
+                loss.backward()
+                warmup_opt.step()
+            progress.progress(0.15, text="Training with physics constraints...")
+
+            # Main training
+            optimizer = torch.optim.Adam([
+                {'params': model.network.parameters(), 'lr': 1e-3},
+                {'params': [model.GM_param], 'lr': 5e-3},
+            ])
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, patience=500, factor=0.5, min_lr=1e-6,
+            )
+
+            loss_history = []
+            GM_history = []
+
+            for epoch in range(epochs_o):
+                optimizer.zero_grad()
+                t_col = torch.rand(600, 1) * t_max_o
+                loss_phys = model.physics_loss(t_col)
+                out_obs = model(t_obs_t)
+                loss_data = (torch.mean((out_obs[:, 0] - x_obs_t) ** 2) +
+                             torch.mean((out_obs[:, 1] - y_obs_t) ** 2))
+                t0 = torch.zeros(1, 1)
+                out0 = model(t0)
+                loss_ic = ((out0[0, 0] - x0_t) ** 2 + (out0[0, 1] - y0_t) ** 2 +
+                           (out0[0, 2] - vx0_t) ** 2 + (out0[0, 3] - vy0_t) ** 2)
+                total = loss_phys + 10.0 * loss_data + 50.0 * loss_ic
+                total.backward()
+                optimizer.step()
+                scheduler.step(total.item())
+                model.clamp_parameters()
+                loss_history.append(total.item())
+                GM_history.append(model.GM)
+
+                if (epoch + 1) % 200 == 0:
+                    progress.progress(
+                        0.15 + 0.85 * (epoch + 1) / epochs_o,
+                        text=f"Epoch {epoch+1}/{epochs_o} | "
+                             f"GM={model.GM:.4f} | "
+                             f"Loss: {total.item():.6f}")
+
+            progress.empty()
+
+            GM_err = abs(model.GM - GM_true) / GM_true * 100
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Inferred GM", f"{model.GM:.4f}",
+                       f"{GM_err:.1f}% error")
+            m2.metric("True GM", f"{GM_true:.4f}")
+            m3.metric("Final Loss", f"{loss_history[-1]:.6f}")
+
+            # PINN reconstruction
+            model.eval()
+            t_plot = np.linspace(0, t_max_o, 1500)
+            with torch.no_grad():
+                out = model(torch.tensor(t_plot, dtype=torch.float32).unsqueeze(1)).numpy()
+            x_pinn, y_pinn = out[:, 0], out[:, 1]
+
+            # Plots: 1x3
+            fig = make_subplots(
+                rows=1, cols=3,
+                subplot_titles=[
+                    "Orbit Reconstruction", "GM Convergence", "Training Loss",
+                ],
+            )
+
+            fig.add_trace(go.Scatter(
+                x=data['x_true'], y=data['y_true'],
+                mode='lines', name='Ground truth',
+                line=dict(color=C_CLASSICAL),
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=data['x_obs'], y=data['y_obs'],
+                mode='markers', name='Noisy obs',
+                marker=dict(color='gray', size=4, opacity=0.5),
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=x_pinn, y=y_pinn,
+                mode='lines', name='PINN reconstruction',
+                line=dict(color=C_PINN, dash='dash'),
+            ), row=1, col=1)
+
+            fig.add_trace(go.Scatter(
+                y=GM_history, mode='lines', name='Inferred GM',
+                line=dict(color=C_PINN), showlegend=False,
+            ), row=1, col=2)
+            fig.add_hline(y=GM_true, line_dash="dash",
+                          line_color=C_CLASSICAL, row=1, col=2)
+
+            fig.add_trace(go.Scatter(
+                y=loss_history, mode='lines',
+                line=dict(color='navy'), showlegend=False,
+            ), row=1, col=3)
+            fig.update_yaxes(type="log", row=1, col=3)
+
+            fig.update_layout(height=450, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
