@@ -47,7 +47,8 @@
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.benchmarks.benchmark_runner import BenchmarkRunner\nfrom src.utils.metrics import l2_relative_error, spectral_convergence, training_efficiency\nprint\\('All benchmark imports OK'\\)\n\" 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_benchmarks.py -v --tb=short 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.training.transfer import save_pretrained, load_pretrained, fine_tune, freeze_early_layers, compute_layer_gradients, transfer_weights_cross_physics\nprint\\('All transfer imports OK'\\)\n\" 2>&1)",
-      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_transfer.py -v --tb=short 2>&1)"
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_transfer.py -v --tb=short 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ --tb=no -q --ignore=tests/__pycache__)"
     ]
   }
 }

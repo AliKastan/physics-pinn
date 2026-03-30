@@ -347,19 +347,74 @@ def train_orbital(x0, y0, vx0, vy0, t_max, GM,
 st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
-    ["Pendulum", "Orbital Mechanics", "Inverse Problem",
+    ["Home",
+     "Pendulum", "Orbital Mechanics", "Inverse Problem",
      "Heat Equation", "Wave Equation", "Three-Body Problem",
      "Transfer Learning", "Benchmarks"],
     index=0,
 )
 
 # ===========================================================================
-# Pendulum mode
+# Home / Landing page
 # ===========================================================================
 
 C_HNN = "#00CC96"  # green for HNN traces
 
-if mode == "Pendulum":
+if mode == "Home":
+    st.title("Physics-Informed Neural Networks")
+    st.markdown(
+        "A comprehensive framework for solving differential equations with "
+        "neural networks. Select a system from the sidebar to explore."
+    )
+
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("### ODEs")
+        st.markdown(
+            "- **Pendulum** -- nonlinear oscillator with energy conservation\n"
+            "- **Orbital Mechanics** -- Keplerian orbits with angular momentum\n"
+            "- **Three-Body Problem** -- chaotic gravitational dynamics"
+        )
+    with col2:
+        st.markdown("### PDEs")
+        st.markdown(
+            "- **Heat Equation** -- diffusion with Fourier series validation\n"
+            "- **Wave Equation** -- propagation, mode decomposition, energy"
+        )
+    with col3:
+        st.markdown("### Advanced")
+        st.markdown(
+            "- **Inverse Problem** -- infer parameters from noisy data\n"
+            "- **Transfer Learning** -- reuse learned features across configs\n"
+            "- **Benchmarks** -- systematic method comparison"
+        )
+
+    st.markdown("---")
+    st.markdown("### Key Capabilities")
+    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+    mcol1.metric("Physical Systems", "7")
+    mcol2.metric("Model Architectures", "9")
+    mcol3.metric("Automated Tests", "131")
+    mcol4.metric("Training Techniques", "6")
+
+    st.markdown(
+        "**Methods:** Standard PINN | Hamiltonian NN | Fourier Features | "
+        "Adaptive Collocation (RAR) | Curriculum Learning | Transfer Learning"
+    )
+    st.markdown(
+        "**Theory:** [Raissi et al. 2019](https://doi.org/10.1016/j.jcp.2018.10.045) | "
+        "[Greydanus et al. 2019](https://arxiv.org/abs/1906.01563) | "
+        "[Tancik et al. 2020](https://arxiv.org/abs/2006.10739)"
+    )
+
+
+# ===========================================================================
+# Pendulum mode
+# ===========================================================================
+
+elif mode == "Pendulum":
     st.title("Simple Pendulum PINN")
     st.markdown("Train a neural network to solve the pendulum ODE using only physics constraints.")
 
