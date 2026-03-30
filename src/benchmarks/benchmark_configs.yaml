@@ -1,0 +1,77 @@
+# Benchmark configurations for systematic evaluation
+# Each problem has a "quick" config (for CI) and a "full" config (for paper results)
+
+pendulum:
+  quick:
+    epochs: 500
+    n_collocation: 200
+    ic_weight: 20.0
+    t_max: 5.0
+    theta_0_deg: 45
+    g: 9.81
+    L: 1.0
+  full:
+    epochs: 5000
+    n_collocation: 500
+    ic_weight: 20.0
+    t_max: 10.0
+    theta_0_deg: 45
+    g: 9.81
+    L: 1.0
+
+orbital:
+  quick:
+    epochs: 500
+    n_collocation: 300
+    ic_weight: 50.0
+    eccentricity: 0.3
+    GM: 1.0
+    n_orbits: 0.5
+  full:
+    epochs: 8000
+    n_collocation: 800
+    ic_weight: 50.0
+    eccentricity: 0.3
+    GM: 1.0
+    n_orbits: 1.0
+
+heat:
+  quick:
+    epochs: 500
+    n_interior: 500
+    n_bc: 50
+    n_ic: 50
+    alpha: 0.01
+    ic_type: sine
+  full:
+    epochs: 8000
+    n_interior: 2000
+    n_bc: 200
+    n_ic: 200
+    alpha: 0.01
+    ic_type: sine
+
+wave:
+  quick:
+    epochs: 500
+    n_interior: 500
+    n_bc: 50
+    n_ic: 50
+    c: 1.0
+    t_max: 0.5
+    ic_type: sine
+  full:
+    epochs: 8000
+    n_interior: 2000
+    n_bc: 200
+    n_ic: 200
+    c: 1.0
+    t_max: 0.5
+    ic_type: sine
+
+# Hyperparameter sweep ranges
+sweeps:
+  hidden_sizes: [32, 64, 128, 256]
+  num_layers: [2, 3, 4, 5, 6]
+  epochs: [1000, 3000, 5000, 10000, 20000]
+  n_collocation: [100, 200, 500, 1000, 2000, 5000]

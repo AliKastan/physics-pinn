@@ -42,6 +42,7 @@ from src.utils.metrics import (
     compute_angular_momentum, compute_hamiltonian_pendulum,
 )
 from src.training.losses import pendulum_ic_loss, orbital_ic_loss
+from src.benchmarks.benchmark_runner import BenchmarkRunner
 from src.models.threebody_pinn import (
     ThreeBodyPINN as ThreeBodyPINNClass, PRESETS as TB_PRESETS,
     train_threebody, solve_threebody,
@@ -343,7 +344,7 @@ st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
     ["Pendulum", "Orbital Mechanics", "Inverse Problem",
-     "Heat Equation", "Wave Equation", "Three-Body Problem"],
+     "Heat Equation", "Wave Equation", "Three-Body Problem", "Benchmarks"],
     index=0,
 )
 
@@ -1575,3 +1576,157 @@ elif mode == "Three-Body Problem":
                 xaxis_title="Epoch", yaxis_title="Loss",
                 template="plotly_white")
             st.plotly_chart(fig_loss_tb, use_container_width=True)
+
+
+# ===========================================================================
+# Benchmarks mode
+# ===========================================================================
+
+elif mode == "Benchmarks":
+    st.title("PINN Benchmarks Dashboard")
+    st.markdown(
+        "Run systematic benchmarks across all problems and methods. "
+        "Compare accuracy, energy conservation, and training efficiency."
+    )
+
+    bench_mode = st.radio(
+        "Benchmark mode",
+        ["Quick (CI-level, ~1 min)", "Load saved results"],
+        key="bench_mode", horizontal=True,
+    )
+
+    if bench_mode == "Quick (CI-level, ~1 min)":
+        problem = st.selectbox(
+            "Problem",
+            ["pendulum", "orbital", "heat", "wave", "all"],
+            key="bench_problem",
+        )
+
+        if st.button("Run Benchmark", key="bench_run"):
+            torch.manual_seed(42)
+            runner = BenchmarkRunner(mode="quick")
+            progress_b = st.progress(0, text="Running benchmarks...")
+
+            if problem == "all":
+                steps = ["pendulum", "orbital", "heat", "wave"]
+                for i, p in enumerate(steps):
+                    progress_b.progress(
+                        (i) / len(steps),
+                        text=f"Benchmarking {p}...")
+                    getattr(runner, f"run_{p}")()
+                    runner.results[p] = getattr(runner, f"run_{p}")()
+                progress_b.progress(1.0, text="Done!")
+            else:
+                progress_b.progress(0.1, text=f"Benchmarking {problem}...")
+                runner.results[problem] = getattr(runner, f"run_{problem}")()
+                progress_b.progress(1.0, text="Done!")
+
+            progress_b.empty()
+            path = runner.save_results()
+            st.success(f"Results saved to {path}")
+
+            # Display results table
+            st.subheader("Results")
+            st.markdown(runner.generate_markdown_table())
+
+            # Interactive comparison chart
+            st.subheader("Method Comparison")
+            for prob_name, methods in runner.results.items():
+                method_names = list(methods.keys())
+                if len(method_names) < 2:
+                    continue
+
+                # Radar chart for multi-method problems
+                metrics_to_plot = []
+                for m in method_names:
+                    d = methods[m]
+                    l2 = d.get("l2_rel_theta", d.get("l2_rel_pos",
+                         d.get("l2_rel_error", 0)))
+                    ed = d.get("energy_drift", 0)
+                    wt = d.get("wall_time_s", 0)
+                    eff = d.get("epochs_to_0.01", d.get("epochs", 0))
+                    metrics_to_plot.append({
+                        "method": m,
+                        "Accuracy (1-L2)": max(0, 1 - min(l2, 1)),
+                        "Energy Cons.": max(0, 1 - min(ed, 1)),
+                        "Speed (1/time)": 1 / (wt + 0.1),
+                        "Efficiency": 1 / (eff + 1),
+                    })
+
+                categories = ["Accuracy (1-L2)", "Energy Cons.",
+                               "Speed (1/time)", "Efficiency"]
+
+                fig_radar = go.Figure()
+                radar_colors = [C_CLASSICAL, C_PINN, C_ERROR, C_ACCENT]
+                for i, mp in enumerate(metrics_to_plot):
+                    vals = [mp[c] for c in categories]
+                    # Normalise to [0, 1] for radar
+                    max_vals = [max(m2[c] for m2 in metrics_to_plot)
+                                for c in categories]
+                    vals_norm = [v / (mv + 1e-16) for v, mv in zip(vals, max_vals)]
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=vals_norm + [vals_norm[0]],
+                        theta=categories + [categories[0]],
+                        fill='toself', name=mp["method"],
+                        line=dict(color=radar_colors[i % len(radar_colors)]),
+                        opacity=0.6,
+                    ))
+                fig_radar.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 1.1])),
+                    title=f"{prob_name.title()}: Method Comparison",
+                    height=450, template="plotly_white",
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+
+            # Loss bar chart
+            st.subheader("Final Loss Comparison")
+            probs = []
+            meths = []
+            losses_bar = []
+            for prob_name, methods in runner.results.items():
+                for m_name, metrics in methods.items():
+                    probs.append(prob_name)
+                    meths.append(m_name)
+                    losses_bar.append(metrics["final_loss"])
+
+            fig_bar = go.Figure()
+            for m_name in sorted(set(meths)):
+                mask = [i for i, m in enumerate(meths) if m == m_name]
+                fig_bar.add_trace(go.Bar(
+                    x=[probs[i] for i in mask],
+                    y=[losses_bar[i] for i in mask],
+                    name=m_name,
+                ))
+            fig_bar.update_layout(
+                barmode='group', yaxis_type='log',
+                yaxis_title='Final Loss',
+                height=400, template='plotly_white',
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+    else:
+        # Load saved results
+        import glob
+        results_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src", "benchmarks", "results")
+        json_files = glob.glob(os.path.join(results_dir, "*.json"))
+        if not json_files:
+            st.warning("No saved benchmark results found. Run a benchmark first.")
+        else:
+            selected = st.selectbox(
+                "Select results file",
+                [os.path.basename(f) for f in json_files],
+                key="bench_file",
+            )
+            if selected:
+                import json
+                with open(os.path.join(results_dir, selected)) as f:
+                    saved = json.load(f)
+                runner = BenchmarkRunner(mode="quick")
+                runner.results = saved
+                st.subheader("Results")
+                st.markdown(runner.generate_markdown_table())
+
+                st.subheader("Raw JSON")
+                st.json(saved)

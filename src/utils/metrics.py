@@ -74,3 +74,50 @@ def compute_hamiltonian_pendulum(q, p, g=9.81, L=1.0, m=1.0):
         H: Hamiltonian (total energy) array
     """
     return p ** 2 / (2 * m * L ** 2) - m * g * L * np.cos(q)
+
+
+# =========================================================================
+# Advanced metrics for benchmarking
+# =========================================================================
+
+def l2_relative_error(predicted, reference):
+    """Relative L2 error: ||pred - ref|| / ||ref||."""
+    diff_norm = np.sqrt(np.mean((predicted - reference) ** 2))
+    ref_norm = np.sqrt(np.mean(reference ** 2))
+    return diff_norm / (ref_norm + 1e-16)
+
+
+def energy_drift(E):
+    """Max relative energy drift from initial value (same as relative_energy_drift)."""
+    return relative_energy_drift(E)
+
+
+def angular_momentum_drift(L_arr):
+    """Max relative angular momentum drift from initial value."""
+    L0 = L_arr[0]
+    return np.max(np.abs((L_arr - L0) / (np.abs(L0) + 1e-16)))
+
+
+def spectral_convergence(predicted, reference, dt=1.0):
+    """
+    Compare signals in frequency domain via FFT.
+
+    Returns relative L2 error of the magnitude spectra.
+    """
+    fft_pred = np.abs(np.fft.rfft(predicted))
+    fft_ref = np.abs(np.fft.rfft(reference))
+    diff = np.sqrt(np.mean((fft_pred - fft_ref) ** 2))
+    norm = np.sqrt(np.mean(fft_ref ** 2))
+    return diff / (norm + 1e-16)
+
+
+def training_efficiency(loss_curve, threshold=0.01):
+    """
+    Number of epochs to first reach a loss threshold.
+
+    Returns the epoch index, or len(loss_curve) if never reached.
+    """
+    for i, loss in enumerate(loss_curve):
+        if loss < threshold:
+            return i
+    return len(loss_curve)

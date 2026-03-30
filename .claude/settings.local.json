@@ -42,7 +42,10 @@
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ -v --tb=line --ignore=tests/__pycache__ 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_threebody.py -v --tb=short 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.models import ThreeBodyPINN\nfrom src.models.threebody_pinn import PRESETS, train_threebody, solve_threebody\nprint\\('All three-body imports OK'\\)\nprint\\(f'Presets: {list\\(PRESETS.keys\\(\\)\\)}'\\)\n\" 2>&1)",
-      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_advanced_training.py -v --tb=short 2>&1)"
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_advanced_training.py -v --tb=short 2>&1)",
+      "Bash(ls:*)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.benchmarks.benchmark_runner import BenchmarkRunner\nfrom src.utils.metrics import l2_relative_error, spectral_convergence, training_efficiency\nprint\\('All benchmark imports OK'\\)\n\" 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_benchmarks.py -v --tb=short 2>&1)"
     ]
   }
 }

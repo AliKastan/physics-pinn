@@ -1,0 +1,44 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ -v --tb=short -x \
+            --ignore=tests/__pycache__
+
+      - name: Run quick benchmarks (regression check)
+        run: |
+          python -c "
+          from src.benchmarks.benchmark_runner import BenchmarkRunner
+          runner = BenchmarkRunner(mode='quick')
+          results = runner.run_pendulum()
+          assert results['standard']['final_loss'] < 10.0, 'Pendulum benchmark regression'
+          results_h = runner.run_heat()
+          assert results_h['standard']['final_loss'] < 10.0, 'Heat benchmark regression'
+          print('Quick benchmarks passed')
+          "
