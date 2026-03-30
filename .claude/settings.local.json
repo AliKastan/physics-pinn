@@ -39,7 +39,9 @@
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_equations.py tests/test_pendulum.py tests/test_orbital.py tests/test_hnn.py tests/test_inverse.py tests/test_heat.py -v --tb=line 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_wave.py -v --tb=short 2>&1)",
       "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.models import WavePINN\nfrom src.models.wave_pinn import train_wave_pinn, wave_analytical, WAVE_IC_FUNCTIONS, wave_mode_decomposition, wave_energy\nfrom src.physics.equations import wave_equation_residual\nprint\\('All wave imports OK'\\)\n\" 2>&1)",
-      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ -v --tb=line --ignore=tests/__pycache__ 2>&1)"
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/ -v --tb=line --ignore=tests/__pycache__ 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -m pytest tests/test_threebody.py -v --tb=short 2>&1)",
+      "Bash(/c/Users/kasta/AppData/Local/Programs/Python/Python313/python.exe -c \"\nimport sys; sys.path.insert\\(0, '.'\\)\nimport py_compile\npy_compile.compile\\('src/app.py', doraise=True\\)\nprint\\('app.py compiles OK'\\)\nfrom src.models import ThreeBodyPINN\nfrom src.models.threebody_pinn import PRESETS, train_threebody, solve_threebody\nprint\\('All three-body imports OK'\\)\nprint\\(f'Presets: {list\\(PRESETS.keys\\(\\)\\)}'\\)\n\" 2>&1)"
     ]
   }
 }

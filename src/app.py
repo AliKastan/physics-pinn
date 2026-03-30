@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yaml
 
-from src.models import PINNPendulum, PINNOrbital, HamiltonianNN, HeatPINN, WavePINN
+from src.models import PINNPendulum, PINNOrbital, HamiltonianNN, HeatPINN, WavePINN, ThreeBodyPINN
 from src.models import InversePendulumPINN, InverseOrbitalPINN
 from src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian
 from src.models.inverse_pinn import train_inverse_pendulum, train_inverse_orbital
@@ -42,6 +42,12 @@ from src.utils.metrics import (
     compute_angular_momentum, compute_hamiltonian_pendulum,
 )
 from src.training.losses import pendulum_ic_loss, orbital_ic_loss
+from src.models.threebody_pinn import (
+    ThreeBodyPINN as ThreeBodyPINNClass, PRESETS as TB_PRESETS,
+    train_threebody, solve_threebody,
+    compute_energy as tb_energy, compute_angular_momentum as tb_angmom,
+    physics_loss as tb_physics_loss, ic_loss as tb_ic_loss,
+)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -336,7 +342,8 @@ def train_orbital(x0, y0, vx0, vy0, t_max, GM,
 st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
-    ["Pendulum", "Orbital Mechanics", "Inverse Problem", "Heat Equation", "Wave Equation"],
+    ["Pendulum", "Orbital Mechanics", "Inverse Problem",
+     "Heat Equation", "Wave Equation", "Three-Body Problem"],
     index=0,
 )
 
@@ -1388,3 +1395,183 @@ elif mode == "Wave Equation":
                 xaxis_title="Epoch", yaxis_title="Loss",
                 template="plotly_white")
             st.plotly_chart(fig_loss_w, use_container_width=True)
+
+
+# ===========================================================================
+# Three-Body Problem mode
+# ===========================================================================
+
+elif mode == "Three-Body Problem":
+    st.title("Gravitational Three-Body Problem")
+    st.markdown(
+        "No closed-form solution exists. The PINN learns an approximate "
+        "trajectory that satisfies Newton's law of gravitation for all "
+        "three pairwise interactions."
+    )
+
+    TB_CFG = load_config("threebody_default.yaml")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        preset_name = st.selectbox(
+            "Configuration preset",
+            list(TB_PRESETS.keys()),
+            format_func=lambda s: s.replace('_', ' ').title(),
+            key="tb_preset",
+        )
+        t_max_tb = st.slider("Time horizon", 0.2, 3.0, 1.0, key="tb_tmax")
+    with col2:
+        epochs_tb = st.select_slider(
+            "Training epochs",
+            options=[3000, 5000, 8000, 10000, 15000],
+            value=10000, key="tb_epochs")
+        net_size = st.select_slider(
+            "Network size",
+            options=[64, 128, 256],
+            value=128, key="tb_net")
+
+    state0_tb, masses_tb, period_tb = TB_PRESETS[preset_name]()
+    st.caption(f"Masses: {masses_tb}  |  Approximate period: {period_tb:.3f}")
+
+    if st.button("Train & Simulate", key="tb_train"):
+        torch.manual_seed(42)
+
+        # ---- Classical ground truth ----
+        progress_tb = st.progress(0, text="Computing classical solution (DOP853)...")
+        t_gt, states_gt = solve_threebody(state0_tb, masses_tb, t_max_tb, n_points=2000)
+
+        # ---- Train PINN ----
+        progress_tb.progress(0.05, text="Training Three-Body PINN...")
+
+        model_tb = ThreeBodyPINNClass(hidden_size=net_size, num_hidden_layers=5)
+        opt_tb = torch.optim.Adam(model_tb.parameters(), lr=1e-3)
+        sched_tb = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt_tb, patience=500, factor=0.5, min_lr=1e-6)
+        loss_hist_tb = []
+
+        for ep in range(epochs_tb):
+            opt_tb.zero_grad()
+            t_col = torch.rand(1000, 1) * t_max_tb
+            l_phys = tb_physics_loss(model_tb, t_col, masses_tb)
+            l_ic = tb_ic_loss(model_tb, state0_tb)
+            total = l_phys + 100.0 * l_ic
+            total.backward()
+            opt_tb.step()
+            sched_tb.step(total.item())
+            loss_hist_tb.append(total.item())
+            if (ep + 1) % 200 == 0:
+                progress_tb.progress(
+                    0.05 + 0.90 * (ep + 1) / epochs_tb,
+                    text=f"Epoch {ep+1}/{epochs_tb} | Loss: {total.item():.6f}")
+
+        progress_tb.empty()
+
+        # ---- Evaluate PINN ----
+        model_tb.eval()
+        with torch.no_grad():
+            t_tensor = torch.tensor(t_gt, dtype=torch.float32).unsqueeze(1)
+            states_pinn = model_tb(t_tensor).numpy()
+
+        # ---- Conservation ----
+        E_gt = tb_energy(states_gt, masses_tb)
+        E_pinn = tb_energy(states_pinn, masses_tb)
+        L_gt = tb_angmom(states_gt, masses_tb)
+        L_pinn = tb_angmom(states_pinn, masses_tb)
+        E0 = E_gt[0]
+        L0 = L_gt[0]
+
+        # ---- Metrics ----
+        dE_pinn = np.max(np.abs((E_pinn - E0) / (np.abs(E0) + 1e-16)))
+        total_pos_err = np.zeros(len(t_gt))
+        for i in range(3):
+            total_pos_err += np.sqrt(
+                (states_pinn[:, 2*i] - states_gt[:, 2*i]) ** 2 +
+                (states_pinn[:, 2*i+1] - states_gt[:, 2*i+1]) ** 2)
+
+        m1_c, m2_c, m3_c = st.columns(3)
+        m1_c.metric("Final Loss", f"{loss_hist_tb[-1]:.6f}")
+        m2_c.metric("PINN max |dE/E0|", f"{dE_pinn:.4f}")
+        m3_c.metric("Max pos error", f"{np.max(total_pos_err):.4f}")
+
+        # ---- Colours for bodies ----
+        body_colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+        body_labels = ['Body 1', 'Body 2', 'Body 3']
+
+        # ---- Trajectory plot ----
+        st.subheader("Orbital Trajectories")
+        fig_traj = go.Figure()
+        for i, (clr, lab) in enumerate(zip(body_colors, body_labels)):
+            fig_traj.add_trace(go.Scatter(
+                x=states_gt[:, 2*i], y=states_gt[:, 2*i+1],
+                mode='lines', name=f'{lab} (DOP853)',
+                line=dict(color=clr, width=2), opacity=0.4,
+            ))
+            fig_traj.add_trace(go.Scatter(
+                x=states_pinn[:, 2*i], y=states_pinn[:, 2*i+1],
+                mode='lines', name=f'{lab} (PINN)',
+                line=dict(color=clr, width=2, dash='dash'),
+            ))
+            fig_traj.add_trace(go.Scatter(
+                x=[state0_tb[2*i]], y=[state0_tb[2*i+1]],
+                mode='markers', name=f'{lab} start',
+                marker=dict(color=clr, size=10, symbol='circle'),
+                showlegend=False,
+            ))
+        fig_traj.update_layout(
+            xaxis_title='x', yaxis_title='y',
+            height=550, template="plotly_white",
+            yaxis=dict(scaleanchor="x"),
+        )
+        st.plotly_chart(fig_traj, use_container_width=True)
+
+        # ---- Energy + Angular momentum ----
+        st.subheader("Conservation Laws")
+        fig_cons = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=["Energy Conservation", "Angular Momentum"],
+        )
+        fig_cons.add_trace(go.Scatter(
+            x=t_gt, y=E_gt, mode='lines', name='DOP853',
+            line=dict(color=C_CLASSICAL),
+        ), row=1, col=1)
+        fig_cons.add_trace(go.Scatter(
+            x=t_gt, y=E_pinn, mode='lines', name='PINN',
+            line=dict(color=C_PINN, dash='dash'),
+        ), row=1, col=1)
+        fig_cons.add_trace(go.Scatter(
+            x=t_gt, y=L_gt, mode='lines', name='DOP853',
+            line=dict(color=C_CLASSICAL), showlegend=False,
+        ), row=1, col=2)
+        fig_cons.add_trace(go.Scatter(
+            x=t_gt, y=L_pinn, mode='lines', name='PINN',
+            line=dict(color=C_PINN, dash='dash'), showlegend=False,
+        ), row=1, col=2)
+        fig_cons.update_layout(height=350, template="plotly_white")
+        st.plotly_chart(fig_cons, use_container_width=True)
+
+        # ---- Per-body position error ----
+        st.subheader("PINN Position Error vs Classical Solver")
+        fig_err_tb = go.Figure()
+        for i, (clr, lab) in enumerate(zip(body_colors, body_labels)):
+            pos_err_i = np.sqrt(
+                (states_pinn[:, 2*i] - states_gt[:, 2*i]) ** 2 +
+                (states_pinn[:, 2*i+1] - states_gt[:, 2*i+1]) ** 2)
+            fig_err_tb.add_trace(go.Scatter(
+                x=t_gt, y=pos_err_i, mode='lines',
+                name=lab, line=dict(color=clr),
+            ))
+        fig_err_tb.update_layout(
+            xaxis_title='Time', yaxis_title='|dr|', yaxis_type='log',
+            height=350, template="plotly_white",
+        )
+        st.plotly_chart(fig_err_tb, use_container_width=True)
+
+        with st.expander("Training Loss"):
+            fig_loss_tb = go.Figure()
+            fig_loss_tb.add_trace(go.Scatter(
+                y=loss_hist_tb, mode='lines', line=dict(color='navy')))
+            fig_loss_tb.update_layout(
+                yaxis_type="log", height=350,
+                xaxis_title="Epoch", yaxis_title="Loss",
+                template="plotly_white")
+            st.plotly_chart(fig_loss_tb, use_container_width=True)
