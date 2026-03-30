@@ -112,6 +112,44 @@ def energy_conservation_loss(model, q_traj, p_traj):
 
 
 # =========================================================================
+# Gradient-enhanced loss
+# =========================================================================
+
+def gradient_enhanced_loss(model, t_data, y_data, dydt_data):
+    """
+    Gradient-enhanced data-fitting loss: match both u(t) and du/dt.
+
+    Standard data loss only matches function values.  Adding gradient
+    matching dramatically improves convergence for stiff systems where
+    the derivative carries most of the information.
+
+    Args:
+        model: PINN model
+        t_data: observation times (N, 1), will have requires_grad set
+        y_data: observed state values (N, output_dim)
+        dydt_data: observed derivatives (N, output_dim)
+
+    Returns:
+        Scalar loss = MSE(u) + MSE(du/dt)
+    """
+    t_data = t_data.clone().requires_grad_(True)
+    predictions = model(t_data)
+    loss_val = torch.mean((predictions - y_data) ** 2)
+
+    # Compute du/dt via autograd for each output channel
+    loss_grad = torch.tensor(0.0)
+    for col in range(predictions.shape[1]):
+        dpred_dt = torch.autograd.grad(
+            predictions[:, col:col+1], t_data,
+            grad_outputs=torch.ones(predictions.shape[0], 1),
+            create_graph=True, retain_graph=True,
+        )[0]
+        loss_grad = loss_grad + torch.mean((dpred_dt - dydt_data[:, col:col+1]) ** 2)
+
+    return loss_val + loss_grad
+
+
+# =========================================================================
 # PDE losses
 # =========================================================================
 

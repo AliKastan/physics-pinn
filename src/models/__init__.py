@@ -6,3 +6,4 @@ from .inverse_pinn import InversePendulumPINN, InverseOrbitalPINN
 from .heat_pinn import HeatPINN
 from .wave_pinn import WavePINN
 from .threebody_pinn import ThreeBodyPINN
+from .multiscale_pinn import FourierFeatureEncoding, FourierPendulumPINN, FourierOrbitalPINN
