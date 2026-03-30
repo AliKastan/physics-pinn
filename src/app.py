@@ -43,6 +43,10 @@ from src.utils.metrics import (
 )
 from src.training.losses import pendulum_ic_loss, orbital_ic_loss
 from src.benchmarks.benchmark_runner import BenchmarkRunner
+from src.training.transfer import (
+    save_pretrained, load_pretrained, freeze_early_layers,
+    unfreeze_all, fine_tune, compute_layer_gradients,
+)
 from src.models.threebody_pinn import (
     ThreeBodyPINN as ThreeBodyPINNClass, PRESETS as TB_PRESETS,
     train_threebody, solve_threebody,
@@ -344,7 +348,8 @@ st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
     ["Pendulum", "Orbital Mechanics", "Inverse Problem",
-     "Heat Equation", "Wave Equation", "Three-Body Problem", "Benchmarks"],
+     "Heat Equation", "Wave Equation", "Three-Body Problem",
+     "Transfer Learning", "Benchmarks"],
     index=0,
 )
 
@@ -1576,6 +1581,258 @@ elif mode == "Three-Body Problem":
                 xaxis_title="Epoch", yaxis_title="Loss",
                 template="plotly_white")
             st.plotly_chart(fig_loss_tb, use_container_width=True)
+
+
+# ===========================================================================
+# Transfer Learning mode
+# ===========================================================================
+
+elif mode == "Transfer Learning":
+    st.title("Transfer Learning for PINNs")
+    st.markdown(
+        "Train a PINN on one configuration (source), then fine-tune on a "
+        "different configuration (target) using far fewer epochs. "
+        "Early network layers learn general function-approximation features "
+        "that transfer across parameter regimes."
+    )
+
+    tl_system = st.radio(
+        "System", ["Pendulum (L transfer)", "Orbital (eccentricity transfer)"],
+        key="tl_system", horizontal=True,
+    )
+
+    if tl_system == "Pendulum (L transfer)":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Source configuration**")
+            L_src = st.slider("Source L (m)", 0.5, 3.0, 1.0, key="tl_L_src")
+            theta_0_tl = st.slider("Initial angle (rad)", 0.1, 1.5, 0.5, key="tl_theta")
+            epochs_src = st.select_slider("Source epochs",
+                                           options=[1000, 2000, 3000, 5000],
+                                           value=2000, key="tl_ep_src")
+        with col2:
+            st.markdown("**Target configuration**")
+            L_tgt = st.slider("Target L (m)", 0.5, 3.0, 2.0, key="tl_L_tgt")
+            epochs_ft = st.select_slider("Fine-tune epochs",
+                                          options=[100, 200, 300, 500, 1000],
+                                          value=300, key="tl_ep_ft")
+
+        g_tl = GRAVITY
+        t_max_tl = 10.0
+
+        if st.button("Run Transfer Experiment", key="tl_pend_run"):
+            torch.manual_seed(42)
+
+            # Train source
+            progress_tl = st.progress(0, text="Training source model...")
+            model_src_tl = PINNPendulum()
+            trainer_src = Trainer(model_src_tl, {
+                "epochs": epochs_src, "n_collocation": 500,
+                "ic_weight": 20.0, "t_max": t_max_tl, "lr": 1e-3,
+            }, physics_params={"g": g_tl, "L": L_src})
+            ic_src_fn = lambda: pendulum_ic_loss(model_src_tl, theta_0_tl, 0.0)
+            losses_src_tl, _ = trainer_src.train(ic_src_fn, verbose=False)
+            progress_tl.progress(0.35, text="Source training done. Fine-tuning...")
+
+            # Fine-tune on target
+            import copy
+            model_ft_tl = copy.deepcopy(model_src_tl)
+            ic_ft_fn = lambda: pendulum_ic_loss(model_ft_tl, theta_0_tl, 0.0)
+            losses_ft_tl = fine_tune(model_ft_tl, {
+                "t_max": t_max_tl, "n_collocation": 500, "ic_weight": 20.0,
+            }, ic_ft_fn, {"g": g_tl, "L": L_tgt},
+                epochs=epochs_ft, lr=5e-4, verbose=False)
+            progress_tl.progress(0.55, text="Fine-tuning done. Training from scratch...")
+
+            # Scratch on target
+            torch.manual_seed(42)
+            model_sc_tl = PINNPendulum()
+            trainer_sc = Trainer(model_sc_tl, {
+                "epochs": epochs_src, "n_collocation": 500,
+                "ic_weight": 20.0, "t_max": t_max_tl, "lr": 1e-3,
+            }, physics_params={"g": g_tl, "L": L_tgt})
+            ic_sc_fn = lambda: pendulum_ic_loss(model_sc_tl, theta_0_tl, 0.0)
+            losses_sc_tl, _ = trainer_sc.train(ic_sc_fn, verbose=False)
+            progress_tl.progress(0.90, text="Evaluating...")
+
+            # Evaluate
+            t_eval_tl = np.linspace(0, t_max_tl, 500)
+            _, theta_gt, _ = solve_pendulum_ode(
+                theta_0_tl, 0.0, (0, t_max_tl), t_eval_tl, g=g_tl, L=L_tgt)
+
+            for m in [model_ft_tl, model_sc_tl]:
+                m.eval()
+            with torch.no_grad():
+                t_t = torch.tensor(t_eval_tl, dtype=torch.float32).unsqueeze(1)
+                out_ft = model_ft_tl(t_t).numpy()
+                out_sc = model_sc_tl(t_t).numpy()
+
+            from src.utils.metrics import l2_relative_error
+            err_ft = l2_relative_error(out_ft[:, 0], theta_gt)
+            err_sc = l2_relative_error(out_sc[:, 0], theta_gt)
+
+            # Layer gradients
+            t_grad = torch.rand(100, 1) * t_max_tl
+            grads_ft = compute_layer_gradients(
+                model_ft_tl, t_grad, ic_ft_fn, {"g": g_tl, "L": L_tgt})
+            progress_tl.empty()
+
+            # Metrics
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Scratch epochs", str(epochs_src))
+            m2.metric("Fine-tune epochs", str(epochs_ft))
+            m3.metric("Scratch L2 err", f"{err_sc:.2e}")
+            m4.metric("Fine-tune L2 err", f"{err_ft:.2e}")
+
+            # Training curves
+            st.subheader("Training Curves")
+            fig_tl = make_subplots(rows=1, cols=2,
+                                    subplot_titles=["Loss Curves", "Layer Gradients"])
+
+            fig_tl.add_trace(go.Scatter(
+                y=losses_src_tl, mode='lines', name='Source',
+                line=dict(color=C_CLASSICAL)), row=1, col=1)
+            fig_tl.add_trace(go.Scatter(
+                y=losses_sc_tl, mode='lines', name='Scratch (target)',
+                line=dict(color=C_PINN)), row=1, col=1)
+            ft_x = list(range(epochs_src, epochs_src + len(losses_ft_tl)))
+            fig_tl.add_trace(go.Scatter(
+                x=ft_x, y=losses_ft_tl, mode='lines', name='Fine-tuned',
+                line=dict(color=C_ERROR, width=3)), row=1, col=1)
+            fig_tl.update_yaxes(type="log", row=1, col=1)
+
+            layer_names = [n.replace('network.', '').replace('.weight', ' W')
+                           .replace('.bias', ' b') for n, _ in grads_ft]
+            layer_mags = [g for _, g in grads_ft]
+            fig_tl.add_trace(go.Bar(
+                x=layer_names, y=layer_mags, name='Gradient magnitude',
+                marker_color=C_ERROR, showlegend=False,
+            ), row=1, col=2)
+
+            fig_tl.update_layout(height=400, template="plotly_white")
+            st.plotly_chart(fig_tl, use_container_width=True)
+
+            # Trajectory comparison
+            st.subheader("Trajectory Comparison (target config)")
+            fig_traj_tl = go.Figure()
+            fig_traj_tl.add_trace(go.Scatter(
+                x=t_eval_tl, y=np.degrees(theta_gt), mode='lines',
+                name='Ground truth', line=dict(color=C_CLASSICAL)))
+            fig_traj_tl.add_trace(go.Scatter(
+                x=t_eval_tl, y=np.degrees(out_sc[:, 0]), mode='lines',
+                name='Scratch', line=dict(color=C_PINN, dash='dash')))
+            fig_traj_tl.add_trace(go.Scatter(
+                x=t_eval_tl, y=np.degrees(out_ft[:, 0]), mode='lines',
+                name='Fine-tuned', line=dict(color=C_ERROR, dash='dot')))
+            fig_traj_tl.update_layout(
+                xaxis_title='Time (s)', yaxis_title='Angle (degrees)',
+                height=350, template="plotly_white")
+            st.plotly_chart(fig_traj_tl, use_container_width=True)
+
+    else:  # Orbital
+        col1, col2 = st.columns(2)
+        with col1:
+            e_src_tl = st.slider("Source eccentricity", 0.0, 0.3, 0.0, key="tl_e_src")
+            epochs_src_o = st.select_slider("Source epochs",
+                                             options=[1000, 2000, 3000, 5000],
+                                             value=2000, key="tl_ep_src_o")
+        with col2:
+            e_tgt_tl = st.slider("Target eccentricity", 0.1, 0.8, 0.5, key="tl_e_tgt")
+            epochs_ft_o = st.select_slider("Fine-tune epochs",
+                                            options=[100, 200, 500, 1000],
+                                            value=300, key="tl_ep_ft_o")
+
+        if st.button("Run Transfer Experiment", key="tl_orb_run"):
+            torch.manual_seed(42)
+            GM_tl = GM_DEFAULT
+
+            # Source
+            x0s, y0s, vx0s, vy0s, ps = setup_orbital_ics(e_src_tl, GM_tl)
+            t_max_os = 0.5 * ps
+            progress_tl_o = st.progress(0, text="Training source orbital model...")
+
+            model_src_o = PINNOrbital()
+            x0s_t = torch.tensor(x0s, dtype=torch.float32)
+            y0s_t = torch.tensor(y0s, dtype=torch.float32)
+            vx0s_t = torch.tensor(vx0s, dtype=torch.float32)
+            vy0s_t = torch.tensor(vy0s, dtype=torch.float32)
+            trainer_src_o = Trainer(model_src_o, {
+                "epochs": epochs_src_o, "n_collocation": 500,
+                "ic_weight": 50.0, "t_max": t_max_os, "lr": 1e-3,
+            }, physics_params={"GM": GM_tl})
+            ic_src_o = lambda: orbital_ic_loss(model_src_o, x0s_t, y0s_t, vx0s_t, vy0s_t)
+            losses_src_o, _ = trainer_src_o.train(ic_src_o, verbose=False)
+            progress_tl_o.progress(0.35, text="Fine-tuning on target eccentricity...")
+
+            # Fine-tune
+            import copy
+            x0t, y0t, vx0t, vy0t, pt = setup_orbital_ics(e_tgt_tl, GM_tl)
+            t_max_ot = 0.5 * pt
+            x0t_t = torch.tensor(x0t, dtype=torch.float32)
+            y0t_t = torch.tensor(y0t, dtype=torch.float32)
+            vx0t_t = torch.tensor(vx0t, dtype=torch.float32)
+            vy0t_t = torch.tensor(vy0t, dtype=torch.float32)
+
+            model_ft_o = copy.deepcopy(model_src_o)
+            ic_ft_o = lambda: orbital_ic_loss(model_ft_o, x0t_t, y0t_t, vx0t_t, vy0t_t)
+            losses_ft_o = fine_tune(model_ft_o, {
+                "t_max": t_max_ot, "n_collocation": 500, "ic_weight": 50.0,
+            }, ic_ft_o, {"GM": GM_tl},
+                epochs=epochs_ft_o, lr=5e-4, verbose=False)
+            progress_tl_o.progress(0.65, text="Training from scratch...")
+
+            # Scratch
+            torch.manual_seed(42)
+            model_sc_o = PINNOrbital()
+            trainer_sc_o = Trainer(model_sc_o, {
+                "epochs": epochs_src_o, "n_collocation": 500,
+                "ic_weight": 50.0, "t_max": t_max_ot, "lr": 1e-3,
+            }, physics_params={"GM": GM_tl})
+            ic_sc_o = lambda: orbital_ic_loss(model_sc_o, x0t_t, y0t_t, vx0t_t, vy0t_t)
+            losses_sc_o, _ = trainer_sc_o.train(ic_sc_o, verbose=False)
+            progress_tl_o.empty()
+
+            # Evaluate
+            t_eval_o = np.linspace(0, t_max_ot, 500)
+            _, x_gt_o, y_gt_o, _, _ = solve_orbit_ode(
+                x0t, y0t, vx0t, vy0t, (0, t_max_ot), t_eval_o, GM=GM_tl)
+            gt_o = np.column_stack([x_gt_o, y_gt_o])
+
+            for m in [model_ft_o, model_sc_o]:
+                m.eval()
+            with torch.no_grad():
+                t_to = torch.tensor(t_eval_o, dtype=torch.float32).unsqueeze(1)
+                out_ft_o = model_ft_o(t_to).numpy()
+                out_sc_o = model_sc_o(t_to).numpy()
+
+            from src.utils.metrics import l2_relative_error
+            err_ft_o = l2_relative_error(
+                np.column_stack([out_ft_o[:, 0], out_ft_o[:, 1]]), gt_o)
+            err_sc_o = l2_relative_error(
+                np.column_stack([out_sc_o[:, 0], out_sc_o[:, 1]]), gt_o)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Fine-tune L2 err", f"{err_ft_o:.2e}")
+            m2.metric("Scratch L2 err", f"{err_sc_o:.2e}")
+            m3.metric("Epoch savings", f"{epochs_src_o/epochs_ft_o:.0f}x")
+
+            st.subheader("Training Curves")
+            fig_tl_o = go.Figure()
+            fig_tl_o.add_trace(go.Scatter(
+                y=losses_src_o, mode='lines', name=f'Source (e={e_src_tl})',
+                line=dict(color=C_CLASSICAL)))
+            fig_tl_o.add_trace(go.Scatter(
+                y=losses_sc_o, mode='lines', name=f'Scratch (e={e_tgt_tl})',
+                line=dict(color=C_PINN)))
+            ft_x_o = list(range(epochs_src_o, epochs_src_o + len(losses_ft_o)))
+            fig_tl_o.add_trace(go.Scatter(
+                x=ft_x_o, y=losses_ft_o, mode='lines', name='Fine-tuned',
+                line=dict(color=C_ERROR, width=3)))
+            fig_tl_o.update_layout(
+                yaxis_type="log", height=400,
+                xaxis_title="Epoch", yaxis_title="Loss",
+                template="plotly_white")
+            st.plotly_chart(fig_tl_o, use_container_width=True)
 
 
 # ===========================================================================

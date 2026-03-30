@@ -341,6 +341,30 @@ Key findings:
 - **Curriculum learning** helps on long time horizons by anchoring the solution near t=0 first
 - **HNN** achieves ~200x better energy conservation than standard PINNs by construction
 
+## Transfer Learning
+
+PINNs learn general function-approximation features in early layers and physics-specific mappings in later layers. Transfer learning exploits this hierarchy:
+
+| Experiment | Source | Target | Scratch Epochs | Fine-tune Epochs | Speedup |
+|-----------|--------|--------|---------------|-----------------|---------|
+| Pendulum L transfer | L=1.0 | L=2.0 | 3000 | 300 | ~10x |
+| Orbital eccentricity | e=0.0 | e=0.5 | 3000 | 300 | ~10x |
+| Cross-physics | Pendulum | Orbital | — | 2000 | Partial |
+
+Key findings:
+- **Same-physics transfer** (changing L or eccentricity) works reliably, reaching comparable accuracy in ~10x fewer epochs
+- **Cross-physics transfer** partially works: hidden layers transfer general function-approximation features, but input/output layers must be retrained for the new state space
+- **Layer-wise analysis** confirms that early layers (general features) have small gradients during fine-tuning (already well-adapted), while late layers (physics-specific) adapt strongly
+
+Run transfer experiments:
+```bash
+python examples/transfer_learning/transfer_pendulum.py
+python examples/transfer_learning/transfer_orbital.py
+python examples/transfer_learning/transfer_cross_physics.py
+```
+
+---
+
 Run benchmarks yourself:
 ```bash
 python -c "from src.benchmarks import BenchmarkRunner; BenchmarkRunner('full').run_all(verbose=True)"
@@ -353,7 +377,8 @@ python -c "from src.benchmarks import BenchmarkRunner; BenchmarkRunner('full').r
 1. Raissi, M., Perdikaris, P., & Karniadakis, G. E. (2019). *Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations.* Journal of Computational Physics, 378, 686-707.
 2. Greydanus, S., Dzamba, M., & Cranmer, M. (2019). *Hamiltonian Neural Networks.* NeurIPS 2019.
 3. Cranmer, M. et al. (2020). *Lagrangian Neural Networks.* ICLR 2020 Workshop.
-4. Chenciner, A. & Montgomery, R. (2000). *A remarkable periodic solution of the three-body problem in the case of equal masses.* Annals of Mathematics, 152(3), 881-901.
+4. Tancik, M. et al. (2020). *Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains.* NeurIPS 2020.
+5. Chenciner, A. & Montgomery, R. (2000). *A remarkable periodic solution of the three-body problem in the case of equal masses.* Annals of Mathematics, 152(3), 881-901.
 
 ---
 
