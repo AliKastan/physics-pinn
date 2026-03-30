@@ -53,3 +53,50 @@ def orbital_residual(dx_dt, dy_dt, dvx_dt, dvy_dt, x, y, vx, vy, GM=1.0):
     res_vx = dvx_dt + GM * x / r_cubed
     res_vy = dvy_dt + GM * y / r_cubed
     return res_x, res_y, res_vx, res_vy
+
+
+# =========================================================================
+# PDE residuals
+# =========================================================================
+
+def heat_equation_residual(du_dt, d2u_dx2, alpha=0.01):
+    """
+    1D heat equation residual:  du/dt - alpha * d²u/dx² = 0.
+
+    Args:
+        du_dt: temporal derivative from autograd (N, 1)
+        d2u_dx2: second spatial derivative from autograd (N, 1)
+        alpha: thermal diffusivity
+
+    Returns:
+        residual tensor (N, 1)
+    """
+    return du_dt - alpha * d2u_dx2
+
+
+def dirichlet_bc_residual(u_boundary, target_value):
+    """
+    Dirichlet boundary condition residual: u - target = 0.
+
+    Args:
+        u_boundary: network output at boundary points (N, 1)
+        target_value: prescribed boundary value (scalar or tensor)
+
+    Returns:
+        residual tensor (N, 1)
+    """
+    return u_boundary - target_value
+
+
+def neumann_bc_residual(du_dn_boundary, target_flux):
+    """
+    Neumann boundary condition residual: du/dn - target_flux = 0.
+
+    Args:
+        du_dn_boundary: normal derivative at boundary (N, 1)
+        target_flux: prescribed flux value (scalar or tensor)
+
+    Returns:
+        residual tensor (N, 1)
+    """
+    return du_dn_boundary - target_flux

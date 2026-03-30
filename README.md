@@ -4,7 +4,7 @@
 
 # Physics-Informed Neural Networks: Learning Physics from Differential Equations
 
-A PyTorch implementation of Physics-Informed Neural Networks (PINNs) and Hamiltonian Neural Networks (HNNs) applied to classical mechanics — pendulum motion, two-body orbital mechanics, inverse parameter inference, energy-conserving architectures, and the chaotic three-body problem. Includes an interactive Streamlit web interface, a comparison Jupyter notebook, and a full test suite.
+A PyTorch implementation of Physics-Informed Neural Networks (PINNs) and Hamiltonian Neural Networks (HNNs) applied to classical mechanics and heat transfer — pendulum motion, two-body orbital mechanics, the 1D heat equation (PDE), inverse parameter inference, energy-conserving architectures, and the chaotic three-body problem. Includes an interactive Streamlit web interface, a comparison Jupyter notebook, and a full test suite.
 
 ---
 
@@ -82,6 +82,20 @@ Two conserved quantities validate the solution:
 - **Energy**: E = (1/2)(vx^2 + vy^2) - GM/r
 - **Angular momentum**: L = x*vy - y*vx (Kepler's second law)
 
+### 1D Heat Equation (PDE)
+
+The heat equation describes how temperature diffuses through a material:
+
+```
+du/dt = alpha * d^2u/dx^2
+```
+
+where alpha is the thermal diffusivity. Unlike the ODE systems above, the solution u(x, t) lives in a **2D spatiotemporal domain**, requiring the PINN to enforce the PDE at interior collocation points, Dirichlet boundary conditions at x=0 and x=L, and an initial temperature distribution at t=0 — all as soft constraints in the loss function.
+
+This extends PINNs from ODEs (1D input, time only) to PDEs (2D input, space + time). The key additional challenge is computing **second-order spatial derivatives** (d^2u/dx^2) via two passes of autograd, and sampling collocation points in a 2D domain rather than along a 1D line.
+
+Supported initial conditions: sine wave, step function, Gaussian pulse. For the sine IC with homogeneous Dirichlet BCs, the exact Fourier series solution is available for validation.
+
 ### Three-Body Problem
 
 Three masses interacting via Newtonian gravity:
@@ -120,6 +134,20 @@ dp/dt = -dH/dq     (Hamilton's second equation)
 ```
 
 **Energy conservation is exact by construction** — the symplectic structure guarantees dH/dt = 0 along any trajectory, regardless of network accuracy. In our experiments, the HNN achieves ~200x better energy conservation than the standard PINN.
+
+### Heat Equation PDE (`src/models/heat_pinn.py`)
+
+The `HeatPINN` class extends the framework from ODEs to PDEs. The network maps (x, t) to scalar u(x, t) and is trained with a composite loss:
+
+```
+L_total = L_pde + lambda_bc * L_boundary + lambda_ic * L_initial
+```
+
+- **L_pde**: mean squared PDE residual (du/dt - alpha * d^2u/dx^2) at interior collocation points
+- **L_boundary**: Dirichlet BC violation at x=0 and x=L for random t
+- **L_initial**: deviation from the prescribed initial temperature profile at t=0
+
+Three initial condition types are supported: sine wave (with exact analytical solution for validation), step function, and Gaussian pulse. The Fourier series analytical solution enables quantitative error analysis.
 
 ### Three-Body Problem (`pinn_threebody.py`)
 
@@ -221,18 +249,50 @@ streamlit run app.py
 
 ```
 physics-pinn/
-├── pinn_pendulum.py      # Forward PINN for pendulum dynamics
-├── pinn_orbital.py       # Forward PINN for two-body orbital mechanics
-├── pinn_inverse.py       # Inverse problem: infer g and L from noisy data
-├── hnn_pendulum.py       # Hamiltonian Neural Network with PINN comparison
-├── pinn_threebody.py     # Three-body gravitational problem
-├── comparison.ipynb      # Jupyter notebook comparing all approaches
-├── app.py                # Streamlit interactive web interface
-├── requirements.txt      # Python dependencies
-├── tests/
-│   ├── test_pendulum.py  # Energy conservation tests
-│   ├── test_orbital.py   # Angular momentum conservation tests
-│   └── test_inverse.py   # Parameter recovery tests (5% tolerance)
+├── src/                        # Modular Python package
+│   ├── models/
+│   │   ├── base_pinn.py        # Abstract base class for all PINNs
+│   │   ├── pendulum_pinn.py    # Pendulum-specific PINN
+│   │   ├── orbital_pinn.py     # Orbital-specific PINN
+│   │   ├── heat_pinn.py        # 1D heat equation PINN (PDE)
+│   │   ├── hnn.py              # Hamiltonian Neural Network
+│   │   └── inverse_pinn.py     # Inverse PINNs (parameter estimation)
+│   ├── physics/
+│   │   ├── equations.py        # ODE/PDE residual functions
+│   │   └── constants.py        # Physical constants
+│   ├── training/
+│   │   ├── trainer.py          # Generic training loop
+│   │   ├── losses.py           # Loss functions (physics, IC, BC, data)
+│   │   └── schedulers.py       # LR scheduling utilities
+│   ├── utils/
+│   │   ├── plotting.py         # Matplotlib visualization helpers
+│   │   ├── metrics.py          # Energy drift, L2 error metrics
+│   │   ├── validation.py       # scipy ground-truth solvers
+│   │   └── data_generation.py  # Noisy synthetic data generators
+│   └── app.py                  # Streamlit interactive web interface
+├── configs/                    # YAML hyperparameter configs
+│   ├── pendulum_default.yaml
+│   ├── orbital_default.yaml
+│   └── heat_default.yaml
+├── examples/                   # Standalone demo scripts
+│   ├── hnn_vs_pinn_pendulum.py
+│   └── inverse_problem_demo.py
+├── tests/                      # Pytest test suite
+│   ├── test_equations.py       # Physics residual tests
+│   ├── test_pendulum.py        # Pendulum PINN tests
+│   ├── test_orbital.py         # Orbital PINN tests
+│   ├── test_hnn.py             # HNN energy conservation tests
+│   ├── test_inverse.py         # Parameter recovery tests
+│   └── test_heat.py            # Heat equation PDE tests
+├── pinn_pendulum.py            # Standalone pendulum script
+├── pinn_orbital.py             # Standalone orbital script
+├── pinn_inverse.py             # Standalone inverse problem script
+├── hnn_pendulum.py             # Standalone HNN comparison
+├── pinn_threebody.py           # Standalone three-body problem
+├── pinn_pde.py                 # Standalone PDE (heat + wave) script
+├── comparison.ipynb            # Jupyter notebook comparisons
+├── setup.py                    # Package installation
+├── requirements.txt            # Python dependencies
 └── README.md
 ```
 
@@ -240,13 +300,14 @@ physics-pinn/
 
 ## Network Architecture
 
-| Component | Pendulum PINN | Orbital PINN | HNN | Inverse PINN | Three-Body PINN |
-|-----------|--------------|-------------|-----|-------------|----------------|
-| Input | t (1) | t (1) | q, p (2) | t (1) | t (1) |
-| Hidden | 3 x 64 | 4 x 128 | 3 x 64 | 3 x 64 | 4 x 128 |
-| Activation | tanh | tanh | tanh | tanh | tanh |
-| Output | theta, omega (2) | x, y, vx, vy (4) | H (1) | theta, omega (2) | 12 state vars |
-| Extra | -- | -- | -- | g, L (trainable) | -- |
+| Component | Pendulum PINN | Orbital PINN | Heat PDE | HNN | Inverse PINN | Three-Body |
+|-----------|--------------|-------------|----------|-----|-------------|------------|
+| Input | t (1) | t (1) | x, t (2) | q, p (2) | t (1) | t (1) |
+| Hidden | 3 x 64 | 4 x 128 | 4 x 64 | 3 x 64 | 3 x 64 | 4 x 128 |
+| Activation | tanh | tanh | tanh | tanh | tanh | tanh |
+| Output | theta, omega (2) | x, y, vx, vy (4) | u (1) | H (1) | theta, omega (2) | 12 vars |
+| Derivatives | 1st order | 1st order | 1st + 2nd | via H | 1st order | 1st order |
+| Extra | -- | -- | BCs + IC | -- | g, L trainable | -- |
 
 **Why tanh?** The physics loss requires computing derivatives through the network via backpropagation. Tanh is infinitely differentiable; ReLU has discontinuous derivatives that degrade PINN convergence.
 

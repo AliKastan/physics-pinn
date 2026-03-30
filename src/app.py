@@ -22,10 +22,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import yaml
 
-from src.models import PINNPendulum, PINNOrbital, HamiltonianNN
+from src.models import PINNPendulum, PINNOrbital, HamiltonianNN, HeatPINN
 from src.models import InversePendulumPINN, InverseOrbitalPINN
 from src.models.hnn import generate_pendulum_data, train_hnn, integrate_hnn, compute_hamiltonian
 from src.models.inverse_pinn import train_inverse_pendulum, train_inverse_orbital
+from src.models.heat_pinn import (
+    train_heat_pinn, heat_analytical, IC_FUNCTIONS,
+)
 from src.physics.equations import pendulum_residual, orbital_residual
 from src.physics.constants import GRAVITY, PENDULUM_LENGTH, GM_DEFAULT
 from src.utils.validation import solve_pendulum_ode, solve_orbit_ode, setup_orbital_ics
@@ -329,7 +332,7 @@ def train_orbital(x0, y0, vx0, vy0, t_max, GM,
 st.sidebar.title("PINN Explorer")
 mode = st.sidebar.radio(
     "Select System",
-    ["Pendulum", "Orbital Mechanics", "Inverse Problem"],
+    ["Pendulum", "Orbital Mechanics", "Inverse Problem", "Heat Equation"],
     index=0,
 )
 
@@ -997,3 +1000,165 @@ elif mode == "Inverse Problem":
 
             fig.update_layout(height=450, template="plotly_white")
             st.plotly_chart(fig, use_container_width=True)
+
+
+# ===========================================================================
+# Heat Equation mode
+# ===========================================================================
+
+elif mode == "Heat Equation":
+    st.title("1D Heat Equation PINN")
+    st.markdown(
+        r"Solve $\frac{\partial u}{\partial t} = \alpha \frac{\partial^2 u}{\partial x^2}$ "
+        "on a rod with specified boundary and initial conditions."
+    )
+
+    HEAT_CFG = load_config("heat_default.yaml")
+    heat_phys = HEAT_CFG.get("physics", {})
+    heat_train = HEAT_CFG.get("training", {})
+
+    col1, col2 = st.columns(2)
+    with col1:
+        alpha_val = st.slider(
+            "Thermal diffusivity (alpha)", 0.001, 0.1,
+            float(heat_phys.get("alpha", 0.01)),
+            format="%.3f", key="heat_alpha")
+        L_rod = st.slider("Rod length L", 0.5, 2.0,
+                           float(heat_phys.get("L_rod", 1.0)), key="heat_L")
+        ic_type = st.selectbox(
+            "Initial condition",
+            ["sine", "step", "gaussian"], key="heat_ic")
+    with col2:
+        T_left = st.slider("Left BC: u(0, t)", -1.0, 1.0,
+                             float(heat_phys.get("T_left", 0.0)), key="heat_Tl")
+        T_right = st.slider("Right BC: u(L, t)", -1.0, 1.0,
+                              float(heat_phys.get("T_right", 0.0)), key="heat_Tr")
+        epochs_h = st.select_slider(
+            "Training epochs",
+            options=[3000, 5000, 8000, 10000],
+            value=int(heat_train.get("epochs", 8000)), key="heat_epochs")
+
+    t_max_h = 1.0
+
+    if st.button("Train & Solve", key="heat_train"):
+        torch.manual_seed(42)
+
+        # ---- Train ----
+        progress_h = st.progress(0, text="Training Heat Equation PINN...")
+
+        model_h = HeatPINN()
+        opt_h = torch.optim.Adam(model_h.parameters(), lr=1e-3)
+        sched_h = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt_h, patience=500, factor=0.5, min_lr=1e-6)
+        ic_fn_h = lambda x: IC_FUNCTIONS[ic_type](x, L_rod=L_rod)
+        loss_hist_h = []
+
+        for ep in range(epochs_h):
+            opt_h.zero_grad()
+            x_int = torch.rand(2000, 1) * L_rod
+            t_int = torch.rand(2000, 1) * t_max_h
+            l_pde = model_h.physics_loss(x_int, t_int, alpha=alpha_val)
+            l_bc = model_h.boundary_loss(200, t_max_h, T_left, T_right, L_rod)
+            l_ic = model_h.ic_loss(200, ic_fn_h, L_rod)
+            total = l_pde + 10.0 * l_bc + 10.0 * l_ic
+            total.backward()
+            opt_h.step()
+            sched_h.step(total.item())
+            loss_hist_h.append(total.item())
+            if (ep + 1) % 200 == 0:
+                progress_h.progress(
+                    (ep + 1) / epochs_h,
+                    text=f"Epoch {ep+1}/{epochs_h} | Loss: {total.item():.6f}")
+
+        progress_h.empty()
+
+        # ---- Evaluate on grid ----
+        nx, nt = 100, 100
+        x_arr = np.linspace(0, L_rod, nx)
+        t_arr = np.linspace(0, t_max_h, nt)
+        X, T_grid = np.meshgrid(x_arr, t_arr)
+
+        model_h.eval()
+        with torch.no_grad():
+            x_flat = torch.tensor(X.flatten(), dtype=torch.float32).unsqueeze(1)
+            t_flat = torch.tensor(T_grid.flatten(), dtype=torch.float32).unsqueeze(1)
+            u_pinn = model_h(x_flat, t_flat).numpy().reshape(X.shape)
+
+        # Analytical (only exact for sine IC with homogeneous BCs)
+        has_analytical = (ic_type in ('sine', 'step', 'gaussian')
+                          and T_left == 0.0 and T_right == 0.0)
+        if has_analytical:
+            u_exact = heat_analytical(X, T_grid, alpha=alpha_val,
+                                       L_rod=L_rod, ic_type=ic_type)
+            u_error = np.abs(u_pinn - u_exact)
+        else:
+            u_exact = None
+            u_error = None
+
+        # ---- Metrics ----
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Final Loss", f"{loss_hist_h[-1]:.6f}")
+        if u_error is not None:
+            m2.metric("Max |Error|", f"{np.max(u_error):.2e}")
+            m3.metric("Mean |Error|", f"{np.mean(u_error):.2e}")
+
+        # ---- Heatmap: u(x,t) ----
+        st.subheader("Temperature Field u(x, t)")
+        fig_heat = go.Figure(data=go.Heatmap(
+            x=x_arr, y=t_arr, z=u_pinn,
+            colorscale='Hot', colorbar=dict(title='u'),
+        ))
+        fig_heat.update_layout(
+            xaxis_title='x', yaxis_title='t',
+            height=450, template="plotly_white",
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+        # ---- Comparison at time snapshots ----
+        if has_analytical:
+            st.subheader("PINN vs Analytical at Time Snapshots")
+            t_snaps = [0.0, 0.1, 0.5, 1.0]
+            fig_snap = make_subplots(
+                rows=1, cols=len(t_snaps),
+                subplot_titles=[f"t = {ts}" for ts in t_snaps],
+            )
+            for i, ts in enumerate(t_snaps):
+                t_idx = int(ts / t_max_h * (nt - 1))
+                t_idx = min(t_idx, nt - 1)
+                fig_snap.add_trace(go.Scatter(
+                    x=x_arr, y=u_exact[t_idx, :],
+                    mode='lines', name='Analytical' if i == 0 else None,
+                    line=dict(color=C_CLASSICAL),
+                    showlegend=(i == 0),
+                ), row=1, col=i + 1)
+                fig_snap.add_trace(go.Scatter(
+                    x=x_arr, y=u_pinn[t_idx, :],
+                    mode='lines', name='PINN' if i == 0 else None,
+                    line=dict(color=C_PINN, dash='dash'),
+                    showlegend=(i == 0),
+                ), row=1, col=i + 1)
+            fig_snap.update_layout(height=350, template="plotly_white")
+            st.plotly_chart(fig_snap, use_container_width=True)
+
+            # ---- Error heatmap ----
+            st.subheader("Error: |u_PINN - u_analytical|")
+            fig_err = go.Figure(data=go.Heatmap(
+                x=x_arr, y=t_arr, z=u_error,
+                colorscale='Viridis', colorbar=dict(title='|error|'),
+            ))
+            fig_err.update_layout(
+                xaxis_title='x', yaxis_title='t',
+                height=400, template="plotly_white",
+            )
+            st.plotly_chart(fig_err, use_container_width=True)
+
+        # ---- Training loss ----
+        with st.expander("Training Loss"):
+            fig_loss_h = go.Figure()
+            fig_loss_h.add_trace(go.Scatter(
+                y=loss_hist_h, mode='lines', line=dict(color='navy')))
+            fig_loss_h.update_layout(
+                yaxis_type="log", height=350,
+                xaxis_title="Epoch", yaxis_title="Loss",
+                template="plotly_white")
+            st.plotly_chart(fig_loss_h, use_container_width=True)

@@ -109,3 +109,22 @@ def energy_conservation_loss(model, q_traj, p_traj):
     H = model(q_traj, p_traj)
     H0 = H[0].detach()
     return torch.mean((H - H0) ** 2)
+
+
+# =========================================================================
+# PDE losses
+# =========================================================================
+
+def pde_total_loss(model, x_int, t_int, alpha,
+                   n_bc, t_max, T_left, T_right, L_rod,
+                   n_ic, ic_fn,
+                   bc_weight=10.0, ic_weight=10.0):
+    """
+    Combined PDE loss:  L_pde + bc_weight * L_bc + ic_weight * L_ic.
+
+    Convenience function that calls the model's own loss methods.
+    """
+    loss_pde = model.physics_loss(x_int, t_int, alpha=alpha)
+    loss_bc = model.boundary_loss(n_bc, t_max, T_left, T_right, L_rod)
+    loss_ic = model.ic_loss(n_ic, ic_fn, L_rod)
+    return loss_pde + bc_weight * loss_bc + ic_weight * loss_ic
